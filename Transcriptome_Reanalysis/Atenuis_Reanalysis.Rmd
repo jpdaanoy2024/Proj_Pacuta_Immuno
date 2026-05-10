@@ -1,0 +1,345 @@
+---
+title: "Mcav"
+author: "JK"
+date: "2025-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load libraries
+library(DESeq2)    # BiocManager::install('DESeq2')
+library(limma)     # BiocManager::install('limma')
+library(stringr)
+library(readxl)
+library(pheatmap)
+library(RColorBrewer)
+#library(variancePartition)  # BiocManager::install('variancePartition')
+library(doParallel)
+library(cowplot)
+#source("code/GO_MWU/gomwu.functions.R")
+library(tidyverse)
+library(KOGMWU)  # install.packages("KOGMWU")
+library(adegenet)
+library(ggpubr)
+library(kableExtra)
+setwd("~/Desktop/Pacuta_baseline/Strader/")
+library(htmltools)
+library(arrayQualityMetrics)
+library(DESeq2)
+library(tidyr)
+library(genefilter)
+library(cowplot)
+library(emmeans)
+library(gplots)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggtext)
+library(ape)
+library(vegan)
+library(RColorBrewer)
+#try combat-seq
+library(sva)
+#install.packages("readxl")
+#install.packages("expss")
+library(readxl)
+library(expss)
+```
+
+```{r}
+
+# Load data
+
+#### Gene count data for A tenuis larvae
+gcountsALL=read.table("AGF_larvae_2018_geneCounts_aten.txt", header=T) 
+
+# clean up file names
+colnames(gcountsALL)<-sub("X","", colnames(gcountsALL))
+colnames(gcountsALL) <- sub("_[^_]+$", "", colnames(gcountsALL))
+colnames(gcountsALL)<-gsub("\\.","_", colnames(gcountsALL))
+
+length(gcountsALL[,1]) #24924
+dim(gcountsALL) #24924    96
+
+
+summary(colSums(gcountsALL))
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  135519 1345494 1463876 1444555 1552249 1859418  
+
+
+### REMOVE GENES WITH LOW MEAN COUNTS ###
+
+mns = apply(gcountsALL, 1, mean)
+
+gcounts=gcountsALL[mns>10,] #get rid of genes that show little or no expression
+
+table(mns > 10)
+#FALSE  TRUE 
+#13732 11192 
+dim(gcounts) #11192    96
+
+
+### BUILD A DATAFRAME ASSOCIATING SAMPLE NAMESWITH TREATMENT CONDITIONS ###
+colData=read.csv("Juv_Metadata_ambient_noCross.csv", header=T)
+colData=colData[!duplicated(colData$sample), ]
+rownames(colData)<-colData$sample
+dim(colData) #[1] 15  7
+colData$group=factor(paste0(colData$cross,colData$treatment))
+colData <- colData[order(colData$Zoox),]
+
+all(rownames(colData) %in% colnames(gcounts)) #TRUE
+gcounts <- gcounts[, rownames(colData)]
+all(rownames(colData) == colnames(gcounts))
+
+colData$treatment=as.factor(colData$treatment)
+colData$cross=as.factor(colData$cross)
+```
+
+
+```{r}
+#write metadata of all ambient juvenile data with C1 and D1
+write.csv(colData, file = "Acro_juv_info_algal_type_baselineDvsC.csv", row.names = TRUE)
+#save count data
+write.csv(gcounts, file = "Acro_juv_counts_baselineDvsC.csv", row.names = TRUE)
+```
+
+```{r}
+subset_counts=gcounts
+meta_sub=colData
+dds<-DESeq2::DESeqDataSetFromMatrix(countData = subset_counts, colData = meta_sub, design=~Zoox)
+keep.corr = rowSums(counts(dds) >= 2) >= 5 # at least  samples (80%) with a count of 2 or higher
+dds = dds[keep.corr,]
+dds<-DESeq(dds)
+## saving the rlog for DEG heatmap
+rlog <- DESeq2::rlog(dds, blind = TRUE) #for use later on
+#save text
+rlog_matrix <- assay(rlog)
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE) # quickly estimate dispersion trend and apply a variance stabilizing transformation
+write.table(rlog_matrix, file = "Acro_juv_rlog_normalized_counts.txt", sep = "\t", quote = FALSE, col.names = NA)
+vsd_matrix <- assay(vsd)
+```
+
+```{r}
+#conduct outlier test to see which samples are outliers
+vsd.ge=assay(vst(dds))
+rl=vst(dds)
+e=ExpressionSet(assay(rl), AnnotatedDataFrame(as.data.frame(colData(rl))))
+arrayQualityMetrics(e,outdir="outlier",intgroup=c("Zoox"),force=T)
+# double-click index.html
+#no samples detected as outliers in two tests
+```
+
+
+
+```{r}
+str(meta_sub)
+#Perform PCA on variance-stabilized data (vsd), including "age" as a grouping variable
+pcaData <- plotPCA(vsd, intgroup = c("Zoox","cross"), returnData = TRUE)
+# extract variance for all PCs
+percentVar <- round((100 * attr(pcaData, "percentVar")), 2)
+percentVar
+#[1] 31.85 23.41
+pcaData$Zoox <- as.factor(pcaData$Zoox)
+pcaData$cross <- as.factor(pcaData$cross)
+# Run adonis Algae_type and Platform
+GE_pca <-adonis(pcaData[, 1:2] ~ Zoox*cross, data = pcaData, method = 'euclidean', permutations = 1500)
+GE_pca
+#Df SumsOfSqs MeanSqs F.Model      R2  Pr(>F)  
+# Df SumsOfSqs MeanSqs F.Model      R2    Pr(>F)    
+#Zoox       1    245.61 245.615  312.31 0.32344 0.0006662 ***
+#cross      3    505.90 168.633  214.42 0.66620 0.0006662 ***
+#Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+```
+
+
+```{r}
+##
+unique_colonies <- unique(pcaData$cross)
+shape_values <- sample(0:25, length(unique_colonies), replace = FALSE)
+shapevec <- setNames(shape_values, unique_colonies)
+colvec<- c(C1="brown4", D1 ="darkgreen")
+#points are overlapping with each other. Use jitter to make each point visible.
+pca_plot <- ggplot(pcaData, aes(PC1, PC2, shape = cross, group = Zoox, fill = Zoox, colour = Zoox)) +
+  geom_jitter(size = 1.5, stroke = 0.7, alpha = 0.8) + # Add jitter to reduce overlap
+  theme_bw() +
+  stat_ellipse(geom = "polygon", alpha = 0.15, aes(fill = Zoox), show.legend = FALSE) + # Keep ellipses behind points
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar[2], "%)")) +
+scale_shape_manual(values = shapevec) + 
+  theme(legend.position = "right")
+pca_plot
+ggsave("Aten_juvenile.pdf", width = 5, height = 3.5)
+```
+
+
+```{r Differential gene expression}
+coldata=colData
+#Durisdinium vs Cladocopium pairwise comparisons
+coldata$Zoox<-factor(coldata$Zoox, levels=c("D1","C1"))
+#results will be Dur/Cladocopium
+dge_Dur <- results(dds, contrast=c("Zoox","D1","C1"))
+#check DGE cutoff padj <0.05
+table(dge_Dur$padj<0.05)
+#FALSE  TRUE 
+#10543   587 
+sig_dge_Dur <- dge_Dur[which(dge_Dur$padj < 0.05), ]
+summary(sig_dge_Dur)
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 303, 52%
+#LFC < 0 (down)     : 284, 48%
+dge_Dur_fltd <- dge_Dur[which(dge_Dur$padj<0.05),]
+table(dge_Dur_fltd$padj<0.05)
+write.table(dge_Dur, file="Acro_juv_dge_Dur.txt", quote=F, sep="\t")
+dge_Dur<-read.delim("Acro_juv_dge_Dur.txt",header = TRUE)
+dge_Dur_fltd <- dge_Dur[which(dge_Dur$padj<0.05),]
+```
+
+
+```{r}
+# Categorize the genes as upregulated or downregulated
+# Function to categorize and summarize data
+summarize_data <- function(data, label) {
+  data$regulation <- ifelse(data$log2FoldChange > 0, "Upregulated", "Downregulated")
+  summary_data <- as.data.frame(table(data$regulation))
+  colnames(summary_data) <- c("Regulation", "Count")
+  summary_data$Dataset <- label
+  return(summary_data)
+}
+
+# Summarize each data frame
+duris <- summarize_data(dge_Dur_fltd, "Heat")
+col<-c("Upregulated"="Red","Downregulated"="Blue")
+# Create the combined stacked bar plot
+ggplot(duris, aes(x = Regulation, y = Count, fill = Regulation)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(x = "Treatment",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_manual(values = col)+coord_flip()+geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "white", size=5)
+ggsave("DGE_stack_barplot.pdf", width = 4.3, height = 3)
+```
+
+```{r}
+#prepare data matrix for GOMWU
+# Prepare data frame with required transformations
+data_dge <- as.data.frame(dge_Dur)
+data_dge$Gene<-row.names(data_dge)
+data_dge<-read.delim("Acro_juv_dge_Dur.txt", header=TRUE, row.names=1)
+# Move row names to a column named 'Gene'
+data_dge$Gene <- rownames(data_dge)
+
+# Optionally, make 'Gene' the first column if not already
+data_dge <- data_dge[, c("Gene", setdiff(names(data_dge), "Gene"))]
+data_dge <- data_dge %>%
+  mutate(
+    signedlogP = -log10(pvalue) * if_else(log2FoldChange < 0, -1, 1)
+  )
+# Adjust pvalue based on the sign of log2FoldChange
+#gomwu suggest to use "form of "signed negative log p-values". These measures are negative decimal logarithms of the raw (uncorrected) p-value for each gene, multiplied by -1 if the gene was down-regulated. As a result, highly significant up-regulated genes get highly positive values, and highly significant down-regulated genes get highly negative values." from Misha Matz file
+data_dge$Spvalue<-log(data_dge$pvalue)
+#https://github.com/hrivera28/oculina_heterotrophy/blob/main/Master_analyses_final.R line 949-950
+data_dge<-mutate(data_dge,signedlogP=case_when(log2FoldChange<0 ~ Spvalue, log2FoldChange>0 ~ Spvalue*-1))
+
+# Select and rename columns to create the final matrix
+dge_matrix_gomwu <- data_dge[, c("Gene", "signedlogP")]
+colnames(dge_matrix_gomwu) <- c("Gene", "signedlogP")
+dge_matrix_gomwu2<-dge_matrix_gomwu[1:2]
+# Remove row names
+rownames(dge_matrix_gomwu2) <- NULL
+# Set the option to print numbers in standard decimal format
+options(scipen = 999)
+write.csv(dge_matrix_gomwu2, file="Acro_dge_Dur_gomwu.csv", quote=FALSE,row.names=FALSE)
+options(scipen = 0)
+```
+
+```{r}
+diff_expr_matrix <- data_dge
+str(diff_expr_matrix)
+volcano_data <- data.frame(
+    Gene = diff_expr_matrix$Gene,  # This is incorrect because row.names will not exist.
+    log2FoldChange = diff_expr_matrix$log2FoldChange,
+    padj = diff_expr_matrix$padj
+)
+
+# The significantly differentially expressed genes are the ones found in the upper-left and upper-right corners.
+# Add a column to the data frame to specify if they are UP- or DOWN- regulated (log2FoldChange respectively positive or negative)
+
+# add a column of NAs
+volcano_data$diffexpressed <- "Not significant"
+
+# if log2Foldchange > 0 and pvalue < 0.1, set as "UP" 
+volcano_data$diffexpressed[volcano_data$log2FoldChange > 0 & volcano_data$padj < 0.05] <- "UP"
+# if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+volcano_data$diffexpressed[volcano_data$log2FoldChange < -0 & volcano_data$padj < 0.05] <- "DOWN"
+data_count_1 <- aggregate(data = volcano_data,                # Applying aggregate
+                          Gene ~ diffexpressed,
+                          function(x) length(unique(x)))
+data_count_1  
+# Re-plot but this time color the points with "diffexpressed"
+p <- ggplot(data=volcano_data, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + geom_point() + theme_bw()
+p
+## Change point color 
+# 1. by default, it is assigned to the categories in an alphabetical order):
+p1 <- p + scale_color_manual(values=c("brown4", "grey", "darkgreen"))
+p1
+ggsave("Acro_JUV_Dur_Clad_volcano_plot.pdf", width = 4.5, height = 2.5)
+```
+
+```{r}
+#annotate here :http://ekhidna2.biocenter.helsinki.fi/sanspanz/
+library(dplyr)
+library(tidyr)
+library(dplyr)
+
+# Sample data input
+df <- read.csv("Aten_GO_Panzzer.csv", stringsAsFactors = FALSE)
+
+# Step 1: Add "GO:" prefix to the goid column
+df$goid <- paste0("GO:", df$goid)
+#save txt
+write.table(df, file="Aten_Panzer_GO.tabv2.txt", sep="\t", quote=FALSE, row.names=FALSE)
+
+
+```
+
+```{r}
+#run rnrichment to string first.
+# Load enrichment data
+enrich_data <- read.csv("Aten_juv_enrichment_BP.csv", header=TRUE,stringsAsFactors=FALSE)
+
+# Inspect data
+head(enrich_data)
+
+# For visualization clarity, select top 20 significant terms (lowest adjusted p-values)
+top_enrich <- enrich_data[order(enrich_data$false.discovery.rate), ][1:19, ]
+
+# Reverse order for plotting (optional, makes more intuitive plot)
+top_enrich <- top_enrich[order(top_enrich$false.discovery.rate, decreasing=TRUE), ]
+top_enrich$term.description <- factor(top_enrich$term.description, levels=top_enrich$term.description)
+str(top_enrich)
+# Bubble plot
+p <- ggplot(top_enrich, aes(x = observed.gene.count, y = term.description,color = -log(false.discovery.rate), size = -log(false.discovery.rate))) +
+  geom_point(alpha = 0.7) +
+  scale_color_continuous(low = "darkgreen", high = "darkgreen", name = "Adjusted p-value", guide = guide_colorbar(reverse = TRUE)) +
+  scale_size(range = c(3,10), name = "Gene Count") +
+  labs(title = "GO Enrichment Bubble Plot",
+       x = "Gene Ratio",
+       y = "GO Term Description") +
+theme_classic() +
+  theme(axis.text.y = element_text(size = 10))
+p
+ggsave("Acro_JUV_Dur_bubble_plot.pdf", width = 8.5, height = 4.5)
+
+```
+
+
+
