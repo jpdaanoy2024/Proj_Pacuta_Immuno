@@ -1,0 +1,1340 @@
+---
+title: "P_acuta_physiology_analysis2026"
+author: "JK"
+date: "2026-03-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#load packages
+library("tidyverse")
+library("ggplot2")
+library("tidyr")
+library("dplyr")
+library("cowplot")
+library("chisq.posthoc.test")
+library("RVAideMemoire")
+library("stats")
+library("ggsignif")
+library("lme4")
+library("forcats")
+library("emmeans")
+library("patchwork")
+library("performance")
+library("lattice")
+library("car")
+library("grid")
+library("nlme")
+```
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+#Import data files
+nubs<-read.csv("PAM_acuta.csv")
+# rename genotypes
+nubs <- nubs %>%
+  mutate(gen = case_when(
+    gen == "eca-h" ~ "ECAH",
+    gen == "ecg" ~ "ECG",
+    gen == "ora-pg" ~ "ORAPG",
+    TRUE ~ gen 
+  ))
+#make na new column called algae type to code if genotype host cladocopium, or durisdinium
+nubs <- nubs %>%
+  mutate(algae_type = case_when(
+    gen == "ECAH" ~ "Cladocopium",
+    gen == "ECG" ~ "Durisdinium",
+    gen == "ORAPG" ~ "Durisdinium",
+    TRUE ~ NA_character_
+  ))
+codes<-read.csv("Physio_codes.csv")
+
+str(nubs)
+#Organize matrix, rename columns
+nubmeans <- nubs %>%
+  dplyr::group_by(gen, day,treatment,sym)%>%
+  dplyr::summarize(mean=mean(as.numeric(FvFM)),sd = sd(FvFM) / sqrt(n()))
+
+```
+
+```{r}
+nubmeans$day<-as.factor(nubmeans$day)
+nubmeans$treatment<-as.factor(nubmeans$treatment)
+nubmeans$sym<-as.factor(nubmeans$sym)
+colvec<- c("control" = "gray40","heat" = "coral1")
+```
+
+
+```{r}
+#this plot is part of Fig 3B
+#remove ORAG data
+shapes = c("ECAH" = 21, "ECG" = 22, "ORAPG"=24)
+
+# Recode gen labels for plotting
+nubmeans$gen <- factor(nubmeans$gen,
+                       levels = c("ECAH", "ECG", "ORAPG"),
+                       labels = c("1:C", "2:D", "3:D"))
+
+# Update shapes to match new labels
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+# Apply the custom function to create a new column with color codes
+str(nubmeans)
+
+
+#facet
+pdf("pam_overtime_facet.pdf",height = 4,width = 6)
+fvfm_full<-ggplot(nubmeans, aes(x=day, y=mean, fill=treatment, shape=gen, group = interaction(gen, treatment)))+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd),width=.2,position=position_dodge(0))+geom_point(size=4, shape=19)+
+  geom_line(linetype="dashed")+
+  geom_point(size=5)+ 
+  theme_classic()+
+  labs(y="Fv/Fm ± SE")+xlab("Time of Exposure (Day)")+                      # Expand y range
+  guides(color=guide_legend(title="Treatment"), linetype=guide_legend("Treatment"))+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1))+theme(axis.text.x = element_text(angle = 0, hjust = 1))+ 
+  scale_fill_manual(values=colvec)+scale_shape_manual(values = shapes)#+facet_wrap(~algae_type)
+fvfm_full
+dev.off()
+
+#no facet
+pdf("pam_overtime.pdf",height = 4,width = 6)
+fvfm_full<-ggplot(nubmeans, aes(x=day, y=mean, fill=treatment, shape=gen, group = interaction(gen, treatment)))+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd),width=.2,position=position_dodge(0))+geom_point(size=4, shape=19)+
+  geom_line(linetype="dashed")+
+  geom_point(size=5)+ 
+  theme_classic()+
+  labs(y="Fv/Fm ± SE")+xlab("Time of Exposure (Day)")+                      # Expand y range
+  guides(color=guide_legend(title="Treatment"), linetype=guide_legend("Treatment"))+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1))+theme(axis.text.x = element_text(angle = 0, hjust = 1))+ 
+  scale_fill_manual(values=colvec)+scale_shape_manual(values = shapes)+facet_wrap(~sym)
+fvfm_full
+dev.off()
+```
+```{r}
+# Make sure variables are correct types
+nubs$day       <- as.numeric(nubs$day)
+nubs$treatment <- as.factor(nubs$treatment)
+nubs$gen       <- factor(nubs$gen,
+                         levels = c("ECAH", "ECG", "ORAPG"),
+                         labels = c("1:C", "2:D", "3:D"))
+
+# make tank unique across treatments
+nubs$tank_unique <- paste(nubs$treatment, nubs$tank, sep = "_")
+
+# do full repeated measures model with interaction and tank as random effect. 
+#use lmer with tank random effect instead
+mod_time <- lmer(FvFM ~ treatment * gen * day + (1 | tank_unique),
+                    data = nubs)
+
+summary(mod_time)
+car::Anova(mod_time, type = "III")
+```
+```{r}
+# Slopes over time per genotype per treatment
+emtrends(mod_time, ~ treatment | gen, var = "day")
+
+# Get estimates at each day separately
+em_days <- emmeans(mod_time, ~ treatment | gen + day,
+                   at = list(day = c(10, 11, 12)),
+                   type = "response")
+
+# Pairwise contrast at each day separately
+pairs(em_days)
+```
+
+
+```{r}
+#for Fig 3c, show day 12 only, as this is where we see the significant differences in the slopes over time
+final_pam<-subset(nubs, day=="12")
+pam_rel <- nubs %>%
+  group_by(sample_id) %>%
+  mutate(FvFM_day1 = FvFM[day == 1]) %>%
+  ungroup() %>%
+  mutate(FvFM_pct_change = ((FvFM - FvFM_day1) / FvFM_day1) * 100)
+
+final_pam <- pam_rel %>%
+  filter(day == 12)
+```
+
+
+```{r}
+final_pam %>%
+  group_by(gen, treatment) %>%
+  summarise(
+    W = shapiro.test(FvFM)$statistic,
+    p = shapiro.test(FvFM)$p.value,
+    .groups = "drop"
+  )
+```
+
+
+```{r}
+sym_cols <- c(c = "brown4", d = "darkgreen")
+bg_cols  <- c(control = "gray40", heat = "coral1")
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+fvfm_fin <- ggplot(final_pam, aes(x = treatment, y = FvFM)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["heat"], alpha = 0.10) +
+  geom_boxplot(
+    aes(fill = sym, group = interaction(treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(color = sym, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.8),
+    size = 4,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  theme_classic() +
+  labs(x = "Treatment", y = "Fv/Fm", fill = "Sym", color = "Sym", shape = "Genotype") +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1)
+  )
+
+fvfm_fin
+```
+```{r}
+library(dplyr)
+
+final_pam <- nubs %>%
+  group_by(sample_id) %>%
+  mutate(FvFM_day1 = FvFM[day == 1][1],
+         FvFM_rel_day1 = FvFM - FvFM_day1) %>%
+  ungroup() %>%
+  filter(day == 12)
+
+sym_cols <- c(c = "brown4", d = "darkgreen")
+bg_cols  <- c(control = "gray40", heat = "coral1")
+
+fvfm_fin <- ggplot(final_pam, aes(x = treatment, y = FvFM_rel_day1)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["heat"], alpha = 0.10) +
+  geom_boxplot(
+    aes(fill = sym, group = interaction(treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(color = sym, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.8),
+    size = 4,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  theme_classic() +
+  labs(x = "Treatment", y = expression(Delta*"Fv/Fm from day 1"),
+       fill = "Sym", color = "Sym", shape = "Genotype") +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1)
+  )
+
+fvfm_fin
+```
+
+
+
+```{r}
+# Fit lmer with random effect of tank
+final_pam$tank_unique <- paste(final_pam$treatment, final_pam$tank, sep = "_")
+fin <- lmer(FvFM ~ treatment * gen + (1 | tank), data = final_pam)
+anova(fin)
+
+summary(fin)
+car::Anova(fin, type = "III")
+#Analysis of Deviance Table (Type III Wald chisquare tests)
+#
+#Response: FvFM
+#                 Chisq Df Pr(>Chisq)    
+#(Intercept)   516.9618  1  < 2.2e-16 ***
+#treatment     125.1064  1  < 2.2e-16 ***
+#gen             0.4792  2      0.787    
+#treatment:gen  31.5355  2   1.42e-07 ***
+```
+```{r}
+# Test overall treatment effect ignoring genotype
+fin_null <- lmer(FvFM ~ gen + (1 | tank_unique),
+                    data = final_pam)
+
+fin_treat <- lmer(FvFM ~ treatment + gen + (1 | tank_unique),
+                     data = final_pam)
+
+anova(fin_null, fin_treat)
+```
+
+```{r}
+em_fin <- emmeans(fin, ~ treatment | gen, type = "response")
+pairs(em_fin)
+```
+```{r}
+final_pam %>%
+  group_by(gen, treatment) %>%
+  summarise(
+    mean = mean(FvFM, na.rm = TRUE),
+    sd   = sd(FvFM, na.rm = TRUE),
+    se   = sd(FvFM, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+```
+
+
+```{r}
+#install.packages("broom.mixed")
+library(broom.mixed)
+library(kableExtra)
+
+```
+
+```{r}
+library(tidyverse)
+library(glmmTMB)
+library(emmeans)
+
+phy <- read.csv("Pacuta_physio_masterdata.csv")
+
+# --- Data prep ---
+phy$algae_average <- (phy$algae_1 + phy$algae_2 + phy$algae_3) / 3
+phy$algae_counts_norm <- (phy$algae_average / 0.000004) / phy$Surface.Area..cm.2.
+
+phy$gen <- ifelse(grepl("^ECAH", phy$ID), "ECAH",
+                  ifelse(grepl("^ECG", phy$ID), "ECG", "ORAPG"))
+phy$sym <- ifelse(grepl("^ECAH", phy$ID), "C", "D")
+
+phy$Treatment <- as.factor(phy$Treatment)
+phy$gen       <- factor(phy$gen, levels = c("ECAH", "ECG", "ORAPG"))
+phy$sym       <- as.factor(phy$sym)
+```
+
+
+
+```{r}
+# Recode Genotype labels for plotting
+phy$gen <- factor(phy$gen,
+                       levels = c("ECAH", "ECG", "ORAPG"),
+                       labels = c("1:C", "2:D", "3:D"))
+
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+colvec <- c("Control" = "gray40", "Heat" = "coral1")
+
+phy$sym <- as.factor(phy$sym)
+
+algae <- ggplot(phy, aes(x = Treatment, y = algae_counts_norm, fill = Treatment)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(aes(fill = Treatment, shape = gen),
+             position = position_jitterdodge(jitter.width = 0.35, dodge.width = 0.25),
+             size = 6, alpha = 0.5) +
+  theme_classic() +
+  labs(y = "Algae density per cm2") +
+  guides(fill  = guide_legend(title = "Treatment"),
+         shape = guide_legend(title = "Genotype:Sym")) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, size = 1)) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1)) +
+  scale_fill_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  facet_wrap(~sym)
+algae
+#the baseline for c and d are different, so we will analyze percent change relative to control for each genotype separately
+```
+
+```{r}
+# for algal density, we see that the control baseline is different between genotypes, so we will do relative change to control baseline for each genotype separately. first get control baseline per genotype
+control_means <- phy %>%
+  filter(Treatment == "Control") %>%
+  group_by(gen) %>%
+  summarise(control_baseline = mean(algae_counts_norm, na.rm = TRUE))
+#relative change to control baseline per genotype
+phy_pct <- phy %>%
+  left_join(control_means, by = "gen") %>%
+  mutate(pct_change = (algae_counts_norm - control_baseline) / control_baseline)
+```
+
+
+```{r}
+# Ensure tank is unique across treatments
+phy_pct$tank_unique <- paste(phy_pct$Treatment, phy_pct$Tank, sep = "_")
+
+mod_algae <- lmer(pct_change ~ Treatment * gen + (1 | tank_unique),
+                  data = phy_pct)
+
+summary(mod_algae)
+```
+```{r}
+# Overall treatment effect
+mod_null <- lmer(pct_change ~ gen + (1 | tank_unique), data = phy_pct)
+mod_treat <- lmer(pct_change ~ Treatment + gen + (1 | tank_unique), data = phy_pct)
+anova(mod_null, mod_treat)
+```
+```{r}
+phy_pct %>%
+  group_by(gen, Treatment) %>%
+  summarise(
+    mean = mean(pct_change, na.rm = TRUE),
+    sd   = sd(pct_change, na.rm = TRUE),
+    se   = sd(pct_change, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+```
+
+
+
+
+```{r}
+car::Anova(mod_algae, type = "III")
+
+# Check tank variance
+VarCorr(mod_algae)
+
+```
+
+
+```{r}
+# Post-hoc
+em1 <- emmeans(mod_algae, ~ Treatment | gen)
+pairs(em1)
+```
+
+
+```{r}
+# Normality check
+mod_algae <- lm(pct_change ~ Treatment * gen, data = phy_pct)
+shapiro.test(residuals(mod_algae))
+
+#Shapiro-Wilk normality test
+
+#data:  residuals(mod_algae)
+#W = 0.94208, p-value = 0.3144
+```
+
+
+
+```{r}
+phy_pct$sym <- as.factor(phy_pct$sym)
+
+algae <- ggplot(phy_pct, aes(x = Treatment, y = pct_change, fill = Treatment)) +
+  geom_boxplot(outlier.shape = NA) +geom_point(aes(fill = Treatment, shape = gen),
+             position = position_jitterdodge(jitter.width = 0.35, dodge.width = 0.25),
+             size = 6, alpha = 0.5) +
+  theme_classic() +
+  labs(y = "Cell density change relative to control") +
+  guides(color = guide_legend(title = "Treatment"), linetype = guide_legend("Treatment")) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, size = 1)) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1)) +
+  scale_fill_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  facet_wrap(~sym)
+algae
+```
+```{r}
+
+sym_cols <- c(C = "brown4", D = "darkgreen")
+bg_cols  <- c(Control = "gray40", Heat = "coral1")
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+algae <- ggplot(phy_pct, aes(x = Treatment, y = pct_change)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["Control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["Heat"], alpha = 0.10) +
+  geom_boxplot(
+    aes(fill = sym, group = interaction(Treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(color = sym, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.8),
+    size = 4,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  theme_classic() +
+  labs(
+    x = "Treatment",
+    y = "Cell density change relative to control",
+    fill = "Sym",
+    color = "Sym",
+    shape = "Genotype"
+  ) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1),
+    axis.text.x = element_text(angle = 0, hjust = 1)
+  )
+
+algae
+```
+
+```{r}
+# Compute mean and SE for each combination of Treatment and Strain
+algae_table <- phy %>%
+  group_by(Treatment,sym) %>%
+  summarise(
+    Mean = mean(algae_counts_norm, na.rm = TRUE),
+    SE = sd(algae_counts_norm, na.rm = TRUE) / sqrt(n())
+  )
+
+# View the summary table
+print(algae_table)
+```
+```{r}
+#Read red intensity channel data
+#algal density calculation here: https://btiscience.org/wp-content/uploads/2015/12/e.-Algae-to-Energy-Counting-Algae-Cells.pdf
+
+# Read and prep
+red <- read.csv("Red_channel_v2.csv") %>%
+  dplyr::select(-g, -b)
+
+
+# Recode gen labels
+red$gen <- factor(red$gen,
+                  levels = c("eca-h", "ecg", "ora-pg"),
+                  labels = c("1:C", "2:D", "3:D"))
+
+red$treatment <- as.factor(red$treatment)
+red$day       <- as_factor(red$day)
+
+# Ensure unique tank
+red$tank_unique <- paste(red$treatment, red$tank, sep = "_")
+
+# --- Step 1: Test baseline difference between genotypes under control ---
+red_control <- red %>% filter(treatment == "control")
+
+mod_baseline <- lmer(r ~ gen + (1 | tank_unique), data = red_control)
+car::Anova(mod_baseline, type = "III")
+#seems that baseline color is different. do relative to controls for downstream analysis
+```
+
+
+```{r}
+# Check day 0 values
+red %>% filter(day == 0) %>% count(gen, treatment)
+
+# Calculate relative change to day 0/start day per individual coral
+day1_means_red <- red %>%
+  filter(day == 0) %>%
+  group_by(gen, treatment) %>%
+  summarise(day1_baseline = mean(r, na.rm = TRUE), .groups = "drop")
+
+print(day1_means_red)
+#since it's clear that there are differences in baseline colors to begin with.# Get each coral's own day 0 value as baseline
+day1_ind <- red %>%
+  filter(day == 0) %>%
+  dplyr::select(sample_id, gen, treatment, r) %>%
+  rename(day1_baseline = r)
+```
+
+```{r}
+# The join is duplicating columns — fix by only selecting what you need from day1
+day1_ind <- red %>%
+  filter(day == 0) %>%
+  dplyr::select(sample_id, day1_baseline = r)
+
+# Join only brings in day1_baseline — no duplicate columns
+red_pct <- red %>%
+  left_join(day1_ind, by = "sample_id") %>%
+  mutate(pct_change = (r - day1_baseline) / day1_baseline)
+
+# Confirm no duplicate columns
+colnames(red_pct)
+
+# Check range
+range(red_pct$pct_change, na.rm = TRUE)
+
+#run model
+mod_red <- lmer(pct_change ~ treatment * gen + (1 | tank_unique),
+                data = red_pct)
+summary(mod_red)
+VarCorr(mod_red)
+
+```
+
+```{r}
+library(lmerTest)
+# Filter to day 12 only
+red_day12 <- red_pct %>% filter(day == 12)
+
+# --- Stats on day 12 only ---
+mod_red <- lmer(pct_change ~ treatment * gen + (1 | tank_unique),
+                data = red_day12)
+```
+
+
+```{r}
+summary(mod_red)
+```
+
+
+```{r}
+car::Anova(mod_red, type = "III")
+#Analysis of Deviance Table (Type III Wald chisquare tests)
+#
+#Response: pct_change
+#                Chisq Df Pr(>Chisq)    
+#(Intercept)    8.6143  1   0.003335 ** 
+#treatment     58.0664  1  2.534e-14 ***
+#gen            2.1521  2   0.340941    
+#treatment:gen 25.2784  2  3.242e-06 ***
+VarCorr(mod_red)
+```
+```{r}
+em_red <- emmeans(mod_red, ~ treatment | gen)
+pairs(em_red)
+#gen = 1:C:
+# contrast       estimate    SE df t.ratio p.value
+# control - heat   -1.050 0.138 11  -7.620  <.0001
+
+#gen = 2:D:
+# contrast       estimate    SE df t.ratio p.value
+# control - heat   -0.312 0.138 11  -2.265  0.0447
+
+#gen = 3:D:
+# contrast       estimate    SE df t.ratio p.value
+#control - heat   -0.286 0.138 11  -2.073  0.0624
+```
+
+```{r}
+shapiro.test(residuals(mod_red))
+```
+```{r}
+# Likelihood ratio
+mod_red_null  <- lmer(pct_change ~ gen + (1 | tank_unique), data = red_day12)
+mod_red_treat <- lmer(pct_change ~ treatment + gen + (1 | tank_unique), data = red_day12)
+anova(mod_red_null, mod_red_treat)
+```
+
+
+```{r}
+# Mean and SD
+red_day12 %>%
+  group_by(gen, treatment) %>%
+  summarise(
+    mean_pct = mean(pct_change, na.rm = TRUE),
+    sd_pct   = sd(pct_change, na.rm = TRUE),
+    .groups  = "drop"
+  )
+```
+
+```{r}
+# day 12 only
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+colvec <- c("control" = "gray40", "heat" = "coral1")
+
+red_plot <- ggplot(red_day12, aes(x = treatment, y = pct_change, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA) +geom_point(aes(fill = treatment, shape = gen),
+             position = position_jitterdodge(jitter.width = 0.35, dodge.width = 0.25),
+             size = 6, alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  theme_classic() +
+  labs(y = "Red channel intensity change relative to day 1") +
+  guides(fill  = guide_legend(title = "Treatment"),
+         shape = guide_legend(title = "Genotype:Sym")) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, size = 1)) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1)) +
+  scale_fill_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  facet_wrap(~sym)
+red_plot
+```
+```{r}
+sym_cols <- c(c = "brown4", d = "darkgreen")
+bg_cols  <- c(control = "gray40", heat = "coral1")
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+red_plot <- ggplot(red_day12, aes(x = treatment, y = pct_change)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["heat"], alpha = 0.10) +
+  geom_boxplot(
+    aes(fill = sym, group = interaction(treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(color = sym, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.8),
+    size = 4,
+    alpha = 0.7
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  theme_classic() +
+  labs(
+    x = "Treatment",
+    y = "Red channel intensity change relative to day 1",
+    fill = "Sym",
+    color = "Sym",
+    shape = "Genotype"
+  ) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1),
+    axis.text.x = element_text(angle = 0, hjust = 1)
+  )
+
+red_plot
+```
+
+```{r}
+# Fv/Fm SE
+final_pam %>%
+  group_by(gen, treatment) %>%
+  summarise(
+    mean = mean(FvFM, na.rm = TRUE),
+    se   = sd(FvFM, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+```
+
+
+```{r}
+#Algal density SE
+phy_pct %>%
+  group_by(gen, Treatment) %>%
+  summarise(
+    mean_pct = mean(pct_change, na.rm = TRUE) * 100,
+    se_pct   = sd(pct_change, na.rm = TRUE) / sqrt(n()) * 100,
+    .groups  = "drop"
+  )
+```
+
+
+```{r}
+# Red channel SE
+red_day12 %>%
+  group_by(gen, treatment) %>%
+  summarise(
+    mean_pct = mean(pct_change, na.rm = TRUE) * 100,
+    se_pct   = sd(pct_change, na.rm = TRUE) / sqrt(n()) * 100,
+    .groups  = "drop"
+  )
+```
+```{r}
+phy <- read.csv("Pacuta_physio_masterdata-v2.csv")
+
+# data prep avarage readings
+phy$algae_average <- (phy$algae_1 + phy$algae_2 + phy$algae_3) / 3
+phy$algae_counts_norm <- (phy$algae_average / 0.000004) / phy$Surface.Area..cm.2.
+
+phy$gen <- ifelse(grepl("^ECAH", phy$ID), "ECAH",
+                  ifelse(grepl("^ECG", phy$ID), "ECG", "ORAPG"))
+phy$sym <- ifelse(grepl("^ECAH", phy$ID), "C", "D")
+
+phy$Treatment <- as.factor(phy$Treatment)
+phy$gen       <- factor(phy$gen, levels = c("ECAH", "ECG", "ORAPG"))
+phy$sym       <- as.factor(phy$sym)
+# Recode Genotype labels for plotting
+phy$gen <- factor(phy$gen,
+                       levels = c("ECAH", "ECG", "ORAPG"),
+                       labels = c("1:C", "2:D", "3:D"))
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+colvec <- c("Control" = "gray40", "Heat" = "coral1")
+phy$sym <- as.factor(phy$sym)
+```
+
+```{r}
+# Data prep. calculate chlA and chlC
+phy$Ave_663 <- rowMeans(phy[, c("chl_663_1", "chl_663_2", "chl_663_3")], na.rm = TRUE)
+phy$Ave_630 <- rowMeans(phy[, c("chl_630_1", "chl_630_2", "chl_630_3")], na.rm = TRUE)
+
+phy$ChlA <- (13.31 * phy$Ave_663) - (0.27 * phy$Ave_630)
+phy$ChlC <- (-8.37 * phy$Ave_663) + (51.72 * phy$Ave_630)
+#compute total chlorophyll and normalize by surface area
+phy$TotalChl <- phy$ChlA + phy$ChlC
+phy$TotalChl_norm <- phy$TotalChl / phy$Surface.Area..cm.2.
+
+phy$Treatment <- factor(phy$Treatment, levels = c("Control", "Heat"))
+phy$gen <- factor(phy$gen, levels = c("1:C", "2:D", "3:D"))
+phy$sym <- factor(phy$sym)
+
+# --- Baseline test under control only ---
+phy_control <- phy %>% filter(Treatment == "Control")
+
+mod_totalchl_baseline <- gls(
+  TotalChl_norm ~ gen,
+  data = phy_control
+)
+#the baseline difference in normalized total chlorophyll is only marginal, not clearly significant. good!!
+car::Anova(mod_totalchl_baseline, type = "III")
+```
+
+```{r}
+#Full model: heterogeneous variance by genotype. do not force all genotypes to have the same residual variance.
+# make tank unique across treatments
+phy$tank_unique <- paste(phy$Treatment, phy$Tank, sep = "_")
+mod_totalchl_lme_het <- lme(
+  TotalChl_norm ~ Treatment * gen,
+  random = ~ 1 | tank_unique,
+  weights = varIdent(form = ~ 1 | gen),
+  data = phy,
+  method = "REML"
+)
+summary(mod_totalchl_lme_het)
+car::Anova(mod_totalchl_lme_het, type = "III")
+#Analysis of Deviance Table (Type III tests)
+
+#Response: TotalChl_norm
+#                 Chisq Df Pr(>Chisq)    
+#(Intercept)   280.0735  1  < 2.2e-16 ***
+#Treatment      59.0820  1  1.512e-14 ***
+#gen             0.6924  2    0.70738    
+#Treatment:gen   5.1794  2    0.07504 . 
+```
+
+
+```{r}
+#do pairwise
+em_totalchl <- emmeans(mod_totalchl_lme_het, ~ Treatment | gen)
+pairs(em_totalchl)
+#gen = 1:C:
+# contrast       estimate    SE df t.ratio p.value
+# Control - Heat     1.12 0.146  4   7.686  0.0015
+
+#gen = 2:D:
+# contrast       estimate    SE df t.ratio p.value
+# Control - Heat    -5.92 3.240  4  -1.823  0.1423
+
+#gen = 3:D:
+# contrast       estimate    SE df t.ratio p.value
+# Control - Heat    -1.26 3.400  4  -0.370  0.7301
+```
+
+```{r}
+# QQ plot
+qqnorm(resid(mod_totalchl_lme_het), main = "QQ plot residuals")
+qqline(resid(mod_totalchl_lme_het))
+```
+
+
+```{r}
+# Residuals by genotype
+boxplot(resid(mod_totalchl_lme_het) ~ phy$gen,
+        xlab = "Genotype", ylab = "Residuals",
+        main = "Residuals by genotype")
+```
+
+
+```{r}
+# calculate means for manuscript reporting
+phy %>%
+  group_by(gen, sym, Treatment) %>%
+  summarise(
+    mean_totalchl = mean(TotalChl_norm, na.rm = TRUE),
+    se_totalchl   = sd(TotalChl_norm, na.rm = TRUE) / sqrt(sum(!is.na(TotalChl_norm))),
+    .groups = "drop"
+  )
+```
+
+```{r}
+totalchl_plot <- ggplot(phy, aes(x = Treatment, y = TotalChl_norm, fill = Treatment)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(aes(fill = Treatment, shape = gen),
+             position = position_jitterdodge(jitter.width = 0.35, dodge.width = 0.25),
+             size = 6, alpha = 0.5) +
+  theme_classic() +
+  labs(y = "Total chlorophyll (µg cm\u207b\u00b2)") +
+  guides(fill  = guide_legend(title = "Treatment"),
+         shape = guide_legend(title = "Genotype:Sym")) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, size = 1)) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1)) +
+  scale_fill_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  facet_wrap(~sym)
+totalchl_plot
+```
+
+```{r}
+# Calculate mean control values for each genotype
+control_means <- phy %>%
+  filter(Treatment == "Control") %>%
+  group_by(gen) %>%
+  summarise(control_mean = mean(TotalChl_norm, na.rm = TRUE), .groups = "drop")
+
+# Join back to main data and calculate relative values
+phy_relative <- phy %>%
+  left_join(control_means, by = "gen") %>%
+  mutate(
+    TotalChl_relative = TotalChl_norm / control_mean,
+    TotalChl_pct_change = ((TotalChl_norm - control_mean) / control_mean) * 100
+  )
+
+```
+
+```{r}
+sym_cols <- c(C = "brown4", D = "darkgreen")
+bg_cols  <- c(Control = "gray40", Heat = "coral1")
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+totalchl_plot <- ggplot(phy_relative, aes(x = Treatment, y = TotalChl_relative)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["Control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["Heat"], alpha = 0.10) +
+  geom_boxplot(
+    aes(fill = sym, group = interaction(Treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(color = sym, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.8),
+    size = 4,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  theme_classic() +
+  labs(
+    x = "Treatment",
+    y = "Total chlorophyll (µg cm\u207b\u00b2)",
+    fill = "Sym",
+    color = "Sym",
+    shape = "Genotype"
+  ) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1),
+    axis.text.x = element_text(angle = 0, hjust = 1)
+  )
+
+totalchl_plot
+```
+
+
+```{r}
+# Summary statistics for the relative values
+phy_relative %>%
+  group_by(gen, Treatment) %>%
+  summarise(
+    mean_relative = mean(TotalChl_relative, na.rm = TRUE),
+    se_relative = sd(TotalChl_relative, na.rm = TRUE) / sqrt(sum(!is.na(TotalChl_relative))),
+    mean_pct_change = mean(TotalChl_pct_change, na.rm = TRUE),
+    se_pct_change = sd(TotalChl_pct_change, na.rm = TRUE) / sqrt(sum(!is.na(TotalChl_pct_change))),
+    .groups = "drop"
+  )
+```
+
+
+
+
+```{r}
+#calculate protein conc
+#import protein standards used for this run
+prot_standards<-read.csv("Protein_standards.csv")
+prot_standards$avg_abs<-rowMeans(prot_standards[,c("Abs.1","Abs.2","Abs.3")], na.rm = TRUE)
+xyplot(Standard~Abs.1+Abs.2+Abs.3, prot_standards)
+```
+
+```{r}
+ggplot(prot_standards, aes(x=avg_abs, y=Standard))+
+  theme_bw()+
+  geom_point(aes(color = Standard))+
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2, raw=TRUE), aes(color = Standard)) #fit second order (quadratic) polynomial
+```
+
+```{r}
+model <- lm(Standard ~ poly(avg_abs,2, raw=TRUE), data=prot_standards) #raw = TRUE means raw polynomials, not orthogonal polynomials
+summary(model)
+model_1 <- lm(Standard ~ avg_abs + I(avg_abs^2), data=prot_standards) #this gives me same answer as excel does, and the same answer when raw=TRUE above
+summary(model_1) #check to see
+```
+
+```{r}
+#based on the model, Intercept=0.003959, x=-0.150788, x2=1.554473
+# now we can use the quadratic equation to solve for absorbance
+# y = ax^2 + bx + c where
+# y = protein concentration
+# x = raw absorbance from Bradford Assay
+
+str(prot_standards)
+str(phy)
+#calculate average algae of algae_1,algae_2,algae_3
+phy$prot_abs<-rowMeans(phy[,c("prot_1","prot_2","prot_3")], na.rm = TRUE)
+# these equations get the protein values in ug/ul
+phy$prot_ul <- ((1.554473*(phy$prot_abs^2)) + (-0.150788*phy$prot_abs) + 0.003959)
+
+# [prot concentration in ug/ul] = ([sample protein value] * [1000 ul in 1 ml / 80 ul of sample volume (where sample volume includes dilution with seawater)] * number of mls in slurry / [surface area of fragment])
+# 80/12.8 is the dilution factor - 80 uL total volume with 12.4 uL of sample
+phy$prot_ul_ugcm2 <- (phy$prot_ul*(80/12.8)*1000)/phy$Surface.Area..cm.2.
+phy$prot_ul_mgcm2 <- phy$prot_ul_ugcm2/1000
+
+```
+
+
+
+
+
+```{r}
+# Fit linear model with different variances per Algae_type
+prot   <- lme(prot_ul_ugcm2~Treatment*gen,
+                 random = ~1 | tank_unique,  
+                 data = phy)
+anova(prot)
+car::Anova(prot, type = "III")
+```
+
+```{r}
+# Compute mean and SE for each combination of Treatment and Strain
+prot_table <- phy %>%
+  group_by(Treatment,gen) %>%
+  summarise(
+    Mean = mean(prot_ul_ugcm2, na.rm = TRUE),
+    SE = sd(prot_ul_ugcm2, na.rm = TRUE) / sqrt(n())
+  )
+
+# View the summary table
+print(prot_table)
+```
+
+```{r}
+#
+prot_1<-ggplot(phy, aes(x = Treatment, y = prot_ul_ugcm2, fill = Treatment)) +
+  geom_boxplot(outlier.shape = NA) +geom_point(aes(fill = Treatment, shape = gen),
+             position = position_jitterdodge(jitter.width = 0.35, dodge.width = 0.25),
+             size = 6, alpha = 0.5) +
+  theme_classic() +
+  labs(y = "protein conc per cm2") +
+  guides(color = guide_legend(title = "Treatment"), linetype = guide_legend("Treatment")) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, size = 1)) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1)) +
+  scale_fill_manual(values = colvec) +
+  scale_shape_manual(values = shapes)+facet_wrap(~sym)
+prot_1
+```
+```{r}
+# Calculate mean control values for each genotype
+control_means_prot <- phy %>%
+  filter(Treatment == "Control") %>%
+  group_by(gen) %>%
+  summarise(control_mean_prot = mean(prot_ul_mgcm2, na.rm = TRUE), .groups = "drop")
+
+# Join back to main data and calculate relative values
+phy_relative_prot <- phy %>%
+  left_join(control_means_prot, by = "gen") %>%
+  mutate(
+    prot_relative = prot_ul_mgcm2 / control_mean_prot,
+    prot_pct_change = ((prot_ul_mgcm2 - control_mean_prot) / control_mean_prot) * 100
+  )
+```
+
+```{r}
+sym_cols <- c(C = "brown4", D = "darkgreen")
+bg_cols  <- c(Control = "gray40", Heat = "coral1")
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+prot_1 <- ggplot(phy_relative_prot, aes(x = Treatment, y = prot_relative)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["Control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["Heat"], alpha = 0.10) +
+  geom_boxplot(
+    aes(fill = sym, group = interaction(Treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(color = sym, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.8),
+    size = 4,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  theme_classic() +
+  labs(
+    x = "Treatment",
+    y = "protein conc per cm2",
+    fill = "Sym",
+    color = "Sym",
+    shape = "Genotype"
+  ) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1),
+    axis.text.x = element_text(angle = 0, hjust = 1)
+  )
+
+prot_1
+```
+
+
+
+```{r}
+# Tissue loss analysis script
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(lmerTest)
+library(car)
+library(emmeans)
+
+loss <- read.csv("Tissue_loss.csv")
+
+str(loss)
+
+# Rename genotypes
+loss <- loss %>%
+  mutate(gen = case_when(
+    gen == "ecah"  ~ "ECAH",
+    gen == "ecg"    ~ "ECG",
+    gen == "ora-pg" ~ "ORAPG",
+    TRUE ~ gen
+  ))
+
+# Add symbiont type
+loss <- loss %>%
+  mutate(algae_type = case_when(
+    gen == "ECAH"  ~ "Cladocopium",
+    gen == "ECG"   ~ "Durusdinium",
+    gen == "ORAPG" ~ "Durusdinium",
+    TRUE ~ NA_character_
+  ))
+# Recode gen labels for plotting
+loss$gen <- factor(loss$gen,
+                       levels = c("ECAH", "ECG", "ORAPG"),
+                       labels = c("1:C", "2:D", "3:D"))
+
+# Make factors / numeric day
+loss$treatment  <- factor(loss$treatment, levels = c("control", "heat", "Control", "Heat"))
+loss$gen        <- factor(loss$gen, levels = c("1:C", "2:D", "3:D"))
+loss$algae_type <- factor(loss$algae_type)
+loss$day_num    <- as.numeric(as.character(loss$day))
+loss$day        <- factor(loss$day)
+```
+
+
+```{r}
+# tank column should exist already
+loss$tank <- factor(loss$tank)
+
+# sample ID column:
+loss$sample_id <- factor(loss$sample_id)
+
+# If sample IDs repeat across tanks, make them unique:
+loss$sample_unique <- interaction(loss$tank, loss$sample_id, drop = TRUE)
+```
+
+
+```{r}
+#assign colors and shapes
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+colvec <- c("control" = "gray40", "heat" = "coral1",
+            "Control" = "gray40", "Heat" = "coral1")
+
+# FULL TIME-COURSE MODEL
+
+# Random effects:
+# - tank intercept
+# - repeated sample intercept
+loss_time_lmer <- lmer(
+  percent_tissue_loss ~ treatment * gen * day + (1 | sample_unique),
+  data = loss,
+  REML = TRUE
+)
+#sample_unique SD = 2.71
+#tank SD = 0.000087
+#isSingular(loss_time_lmer) = TRUE
+#repeated measures on the same sample matter, but tank does not add meaningful variance here.
+
+summary(loss_time_lmer)
+VarCorr(loss_time_lmer)
+isSingular(loss_time_lmer)
+car::Anova(loss_time_lmer, type = "III")
+```
+
+
+```{r}
+# Optional post hoc by day
+em_loss_time <- emmeans(loss_time_lmer, ~ treatment | gen * day)
+pairs(em_loss_time, adjust = "tukey")
+```
+
+
+```{r}
+# Time-course summary table
+loss_time_table <- loss %>%
+  group_by(gen, algae_type, treatment, day_num) %>%
+  summarise(
+    Mean = mean(percent_tissue_loss, na.rm = TRUE),
+    SE   = sd(percent_tissue_loss, na.rm = TRUE) / sqrt(sum(!is.na(percent_tissue_loss))),
+    .groups = "drop"
+  )
+
+print(loss_time_table)
+```
+
+
+
+```{r}
+
+#EXTRACT FINAL DAY
+
+final_day <- max(loss$day_num, na.rm = TRUE)
+
+loss_final <- loss %>%
+  filter(day_num == final_day)
+
+loss_final$tank <- factor(loss_final$tank)
+loss_final$sample_id <- factor(loss_final$sample_id)
+loss_final$sample_unique <- interaction(loss_final$tank, loss_final$treatment, drop = TRUE)
+
+print(final_day)
+table(loss_final$gen, loss_final$treatment)
+```
+
+
+```{r}
+#TEST FINAL DAY
+#    First check tank random effect
+
+# Mixed model with tank random effect
+fin_loss_lmer <- lmer(percent_tissue_loss ~ treatment * gen + (1 | tank),
+  data = loss_final
+)
+
+summary(fin_loss_lmer)
+VarCorr(fin_loss_lmer)
+isSingular(fin_loss_lmer)
+```
+
+
+```{r}
+summary(fin_loss_lmer)
+car::Anova(fin_loss_lmer, type = "III")
+```
+
+
+```{r}
+# Post hoc for final day
+em_loss_final <- emmeans(fin_loss_lmer, ~ treatment | gen)
+pairs(em_loss_final, adjust = "tukey")
+```
+
+
+```{r}
+# Final-day summary table
+
+loss_table_final <- loss_final %>%
+  group_by(gen, algae_type, treatment) %>%
+  summarise(
+    Mean = mean(percent_tissue_loss, na.rm = TRUE),
+    SE   = sd(percent_tissue_loss, na.rm = TRUE) / sqrt(sum(!is.na(percent_tissue_loss))),
+    .groups = "drop"
+  )
+
+print(loss_table_final)
+```
+
+
+```{r}
+
+# Final-day plot
+#ECAH=1:C, ECG:2:D, ORAPG:3:D
+loss_final_plot <- ggplot(loss_final, aes(x = treatment, y = percent_tissue_loss, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(aes(fill = treatment, shape = gen),
+             position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.15),
+             size = 5, alpha = 0.6) +
+  theme_classic() +
+  labs(y = "Coral tissue loss (%)") +
+  guides(fill  = guide_legend(title = "Treatment"),
+         shape = guide_legend(title = "Genotype:Sym")) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    axis.text.x = element_text(angle = 0, hjust = 1)
+  ) +
+  scale_fill_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  facet_wrap(~algae_type)
+loss_final_plot
+```
+
+```{r}
+# Calculate mean control values for each genotype
+control_means_loss <- loss_final %>%
+  filter(treatment == "control") %>%
+  group_by(gen) %>%
+  summarise(control_mean_loss = mean(percent_tissue_loss, na.rm = TRUE), .groups = "drop")
+
+# Join back to main data and calculate relative values
+loss_relative <- loss_final %>%
+  left_join(control_means_loss, by = "gen") %>%
+  mutate(
+    loss_relative = percent_tissue_loss / control_mean_loss,
+    loss_difference = percent_tissue_loss - control_mean_loss,
+    loss_pct_increase = ((percent_tissue_loss - control_mean_loss) / control_mean_loss) * 100
+  )
+sym_cols <- c(Cladocopium = "brown4", Durusdinium = "darkgreen")
+bg_cols  <- c(control = "gray40", heat = "coral1")
+shapes <- c("1:C" = 21, "2:D" = 22, "3:D" = 24)
+loss_final_plot <- ggplot(loss_relative, aes(x = treatment, y = loss_difference)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["heat"], alpha = 0.10) +
+  geom_boxplot(
+    aes(fill = algae_type, group = interaction(treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(color = algae_type, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.8),
+    size = 4,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  theme_classic() +
+  labs(
+    x = "Treatment",
+    y = "Coral tissue loss (%)",
+    fill = "Sym",
+    color = "Sym",
+    shape = "Genotype"
+  ) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1),
+    axis.text.x = element_text(angle = 0, hjust = 1)
+  )
+
+loss_final_plot
+```
+
+
+```{r}
+
+#combine all plots with legends
+pdf("Figure3_SciAdv.pdf",height =12,width = 10)
+plot_grid(fvfm_fin,red_plot,algae,totalchl_plot,prot_1,loss_final_plot, ncol = 2)
+dev.off()
+```
+
+```{r}
+fvfm_fin2        <- fvfm_fin + theme(legend.position = "none")
+algae2           <- algae + theme(legend.position = "none")
+red_plot2        <- red_plot + theme(legend.position = "none")
+totalchl_plot2   <- totalchl_plot + theme(legend.position = "none")
+prot_12          <- prot_1 + theme(legend.position = "none")
+loss_final_plot2 <- loss_final_plot + theme(legend.position = "none")
+pdf("Figure3_SciAdv_withoutLabelsV2.pdf",height =14,width = 8.2)
+plot_grid(fvfm_fin2,red_plot2,algae2,totalchl_plot2,prot_12,loss_final_plot2, ncol = 2)
+dev.off()
+```
