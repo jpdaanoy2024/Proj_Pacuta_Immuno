@@ -1,0 +1,1035 @@
+---
+title: "Pacuta_PCANov2024"
+author: "JK"
+date: "2024-11-22"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(htmltools)
+library(arrayQualityMetrics)
+library(DESeq2)
+library(tidyr)
+library(genefilter)
+library(cowplot)
+library(emmeans)
+library(gplots)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggtext)
+library(ape)
+library(vegan)
+library(RColorBrewer)
+
+```
+
+```{r}
+#try deseq double batch
+#MultiBatch effectively mitigates batch-related variability while preserving genuine biological differences.
+#https://www.biorxiv.org/content/10.1101/2025.04.20.649392v1.full.pdf
+#follow documentation here: https://github.com/julienroyulaval/DESeq2-MultiBatch
+#reinstall deseq2 and use double batch
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#
+#BiocManager::install("DESeq2")
+library(DESeq2)
+##analyse full matrix
+coldata<-read.csv("Pacuta_sample_info_nb.csv")
+#read in counts 
+data <- read.delim2("Pacuta_holobiont_counts_host.txt",header = T, row.names = 1)
+data[data < 0]<- NA
+data<- na.omit(data)
+coldata$Genotype<-as.factor(coldata$Genotype)
+#follow documentation regarding design here:https://bioconductor.riken.jp/packages/3.6/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#group-specific-condition-effects-individuals-nested-within-groups
+str(coldata)
+design_double <- ~ Algae_type + Treatment + Algae_type:Treatment
+dds_double <- DESeqDataSetFromMatrix(countData = data, colData = coldata, design = design_double)
+dds <- DESeq(dds_double)
+
+#dds<-DESeq2::DESeqDataSetFromMatrix(countData = data, colData = coldata, design=~Treatment*Algae_type)
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE) # quickly estimate dispersion trend and apply a variance stabilizing transformation
+
+## saving the rlog for DEG heatmap
+rlog <- DESeq2::rlog(dds, blind = TRUE) #for use later on
+#save text
+rlog_matrix <- assay(rlog)
+write.table(rlog_matrix, file = "Pacuta_rlog_normalized_counts.txt", sep = "\t", quote = FALSE, col.names = NA)
+vsd_matrix <- assay(vsd)
+write.table(vsd_matrix, file = "Pacuta_vsd_normalized_counts.txt", sep = "\t", quote = FALSE, col.names = NA)
+## Save dds and vsd data 
+save(dds, vsd, rlog, file = "pactua_transformed_counts.RData")
+```
+
+
+```{r unfiltered size factor plots, fig.width = 10, fig.height = 4}
+nrow <- nrow(data) # number of rows/counts (38828)
+countMat <- DESeqDataSetFromMatrix(data, coldata, ~ 1) # makes a DESeqDataSet object with count data, experimental design, and no design formula
+counts_SF <- estimateSizeFactors(countMat) #  estimates the size factors using the "median ratio method" described by Equation 5 in Anders and Huber (2010)
+
+# make dataframe of the size factors to visualize
+sizeFactors <- data.frame(sample = counts_SF@colData@listData[["Sample"]], treat = counts_SF@colData@listData[["Treatment"]], sizeFactors = counts_SF@colData@listData[["sizeFactor"]])
+cbPalette <- c(Control="grey40", Heat ="coral1")
+# plot sizeFactors
+ggplot(data = sizeFactors, aes(x = sample, y = sizeFactors, fill = treat)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_manual(values=cbPalette) +
+  #scale_fill_brewer(palette = 2, type = "qual") +
+  geom_bar(stat = "identity") +
+  ggtitle("Unfiltered sizeFactors")
+ggsave("Pacuta_host_sizeFactor_raw.pdf", width = 8.5, height = 3)
+dev.off
+```
+
+
+```{r}
+str(coldata)
+#Perform PCA on variance-stabilized data (vsd), 
+pcaData <- plotPCA(vsd, intgroup = c("Treatment","Genotype","Algae_type","Gen_Algae"), returnData = TRUE)
+# extract variance for all PCs
+percentVar <- round((100 * attr(pcaData, "percentVar")), 2)
+percentVar
+
+```
+
+```{r}
+# run the PERMANOVA with euclidean distances and 1500 iterations
+#head(pcaData[6:30])
+GE_pca <- adonis2(pcaData[1:2] ~ pcaData$Treatment*pcaData$Algae_type*pcaData$Genotype, method = 'eu', permutations = 1500)
+GE_pca
+#pcaData$Treatment                     1   2358.1 0.12833  466.2259 0.0006662 ***
+#pcaData$Algae_type                    1   9384.9 0.51074 1855.4899 0.0006662 ***
+#pcaData$Genotype                      1   6283.1 0.34194 1242.2360 0.0006662 ***
+#pcaData$Treatment:pcaData$Algae_type  1    239.3 0.01303   47.3211 0.0006662 ***
+#pcaData$Treatment:pcaData$Genotype    1     48.9 0.00266    9.6666 0.0039973 ** 
+#Residual                             12     60.7 0.00330                        
+#Total                                17  18375.1 1.00000 
+#Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+```
+
+```{r}
+#check ntop=nXXX, where nXXX is the number of genes to use for PCA. default is 500 which pulls most variable signal.
+pcaData$Treatment<-as.factor(pcaData$Treatment)
+pcaData$Genotype<-as.factor(pcaData$Genotype)
+pcaData$Algae_type<-as.factor(pcaData$Algae_type)
+##
+#assign colors and shape
+#colvec<- c("control" = "gray40","heat" = "coral1")
+#shapes = c("ECAH" = 21, "ECG" = 22, "ORAPG"=24)
+##
+#shapes = c("ECAH"=21,"ECG"=22,"ORAPG"=24, "P2"=25, "P3"=8)
+#colvec<- c(Cladocopium="brown4", Durisdinium ="darkgreen")
+shapes = c("gen1_C" = 21, "gen3_D" = 22, "gen4_D"=24)
+colvec<- c("Control" = "gray40","Heat" = "coral1")
+#points are overlapping with each other. Use jitter to make each point visible.
+pca_plot <- ggplot(pcaData, aes(PC1, PC2, shape = Gen_Algae, group = Treatment, fill = Treatment, colour = Treatment )) +
+  geom_jitter(size = 3, stroke = 0.7, alpha = 0.8, width = 3.5, height = 4.5) + # Add jitter to reduce overlap
+  theme_bw() +
+  stat_ellipse(geom = "polygon", alpha = 0.15, aes(fill = Treatment), show.legend = FALSE) + # Keep ellipses behind points
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar[2], "%)")) +
+  scale_shape_manual(values = shapes) +
+  theme(legend.position = "right") # Adjust legend position for clarity
+
+pca_plot
+
+ggsave("Pacuta_host_nonnormalized.pdf", width = 5, height = 4)
+dev.off
+pca_plot
+```
+
+```{r}
+#analalyse non-combat seq c and d separately
+#subset Cladocopium counts and do DGE
+# Also, ensure you filter 'coldata' to match the filtered 'data'
+c_coldata <- coldata[coldata$Algae_type == "C",]
+# Assuming 'coldata' has the same ordering as 'data' columns
+# Extract cladocopium data
+c_data <- data[, coldata$Algae_type == "C"]
+#run deseq
+dds<-DESeq2::DESeqDataSetFromMatrix(countData = c_data, colData = c_coldata, design=~Treatment)
+keep.corr = rowSums(counts(dds) >= 2) >= 4 # at least 4 samples (80%) with a count of 2 or higher
+dds = dds[keep.corr,]
+dds <- DESeq2::DESeq(dds)
+#C pairwise comparisons
+c_coldata$Treatment<-factor(c_coldata$Treatment, levels=c("Heat","Control"))
+res_Heat <- results(dds, contrast=c("Treatment","Heat","Control"))
+res_Heat
+#
+table(res_Heat$padj<0.05)
+#FALSE  TRUE 
+#10411   648 
+summary(res_Heat, alpha=0.05)
+#out of 15289 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 208, 1.3%
+#LFC < 0 (down)     : 440, 2.8%
+#outliers [1]       : 3, 0.019%
+#low counts [2]     : 4537, 29%
+res_Heat_fltd <- res_Heat[which(res_Heat$padj<0.05),]
+write.table(res_Heat, file="FigSXX_C_Heat_stress.txt", quote=F, sep="\t")
+```
+
+```{r}
+#extract Durusdinium counts
+# Also, ensure you filter 'coldata' to match the filtered 'data'
+d_coldata <- coldata[coldata$Algae_type == "D",]
+# Assuming 'coldata' has the same ordering as 'data' columns
+d_data <- data[, coldata$Algae_type == "D"]
+#run deseq
+dds<-DESeq2::DESeqDataSetFromMatrix(countData = d_data, colData = d_coldata, design=~Treatment*Genotype)
+keep.corr = rowSums(counts(dds) >= 2) >= 8 # at least 10 samples (80%) with a count of 2 or higher
+dds = dds[keep.corr,]
+dds <- DESeq2::DESeq(dds)
+#d pairwise comparisons heat vs control
+d_coldata$Treatment<-factor(d_coldata$Treatment, levels=c("Heat","Control"))
+res_d_Heat <- results(dds, contrast=c("Treatment","Heat","Control"))
+res_d_Heat
+#
+table(res_d_Heat$padj<0.05)
+#FALSE  TRUE 
+#10160  2463 
+summary(res_d_Heat, alpha=0.05)
+#out of 11654 with nonzero total read count
+#aadjusted p-value < 0.05
+#LFC > 0 (up)       : 1180, 8.8%
+#LFC < 0 (down)     : 1283, 9.6%
+#outliers [1]       : 1, 0.0075%
+#low counts [2]     : 780, 5.8%
+#(mean count < 3)
+res_d_Heat_fltd <- res_d_Heat[which(res_d_Heat$padj<0.05),]
+write.table(res_d_Heat, file="FigSXX_D_Heat_stress.txt", quote=F, sep="\t")
+```
+
+```{r}
+##analyse full matrix
+coldata<-read.csv("Pacuta_sample_info_nb.csv")
+#read in counts 
+data <- read.delim2("Pacuta_holobiont_counts_host.txt",header = T, row.names = 1)
+data[data < 0]<- NA
+data<- na.omit(data)
+min_count <- 10
+min_samples <- 5
+```
+
+```{r}
+#try combat-seq
+library(sva)
+```
+
+```{r}
+#start line 233 in Hannah's script
+#https://github.com/hannahaichelman/Oculina_Host_Sym_GE/blob/main/03_DESeq_Scripts/deseq_culturesymcombined.Rmd
+## Use ComBat_seq to perform batch correction
+# counts is the matrix of gene expression raw counts, converting to a matrix here using as.matrix()
+# batch is the batch effect you are worried about (here, whether in culture or in host, because this corresponds to samples being sequenced at different times on different platforms, and with different library prep methods)
+# group is the biological treatment of interest(here, temperature treatment)
+# ComBat-seq needs raw, unnormalized, unlogged counts as an input. Do not apply any rarification before running the batch effects. 
+#the original pca dat looked like clustering of genotype overall. in this code, we will try to correct the data by genotype, such that the matrix will be treated blind regardless of genotype.
+corrected_data = ComBat_seq(counts = as.matrix(data), batch = coldata$Genotype, group = coldata$Treatment)
+## Save dds and vsd data 
+save(corrected_data, file = "FigSXX_pactua_transformed_counts.RData")
+```
+
+
+```{r}
+#Look at total counts
+# Assuming corrected_data and coldata are already loaded and correctly aligned
+totalCounts.corr = colSums(corrected_data)
+
+# Generating a color palette
+library(RColorBrewer)
+num_colors = length(unique(coldata$Gen_Algae))
+color_palette = brewer.pal(num_colors, "Set3")
+
+# Mapping each sample to a color
+sample_colors = color_palette[as.factor(coldata$Gen_Algae)]
+
+# Creating the barplot
+barplot(totalCounts.corr, col=sample_colors, ylab="raw counts", main="P acuta - Batch corrected",
+        names.arg=colnames(corrected_data))
+
+min(totalCounts.corr)
+#454962
+max(totalCounts.corr) 
+#1003351
+```
+
+```{r}
+dds<-DESeq2::DESeqDataSetFromMatrix(countData = corrected_data, colData = coldata, design=~Treatment+Algae_type+Treatment:Algae_type)
+keep.corr = rowSums(counts(dds) >= 2) >= 9 # at least 14 samples (80%) with a count of 2 or higher
+dds = dds[keep.corr,]
+## saving the rlog for DEG heatmap
+rlog <- DESeq2::rlog(dds, blind = TRUE) #for use later on
+#save text
+rlog_matrix <- assay(rlog)
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE) # quickly estimate dispersion trend and apply a variance stabilizing transformation
+write.table(rlog_matrix, file = "FigSXX_Heat_Pacuta_COrrected_rlog_normalized_counts.txt", sep = "\t", quote = FALSE, col.names = NA)
+vsd_matrix <- assay(vsd)
+write.table(vsd_matrix, file = "FigSXX_Heat_Pacuta_COrrected_vsd_normalized_counts.txt", sep = "\t", quote = FALSE, col.names = NA)
+## Save dds and vsd data 
+save(corrected_data,dds, vsd, rlog, file = "FigSXX_pactua_transformed_counts.RData")
+```
+
+```{r unfiltered size factor plots, fig.width = 10, fig.height = 4}
+
+nrow <- nrow(data) # number of rows/counts (38828)
+countMat <- DESeqDataSetFromMatrix(corrected_data, coldata, ~ 1) # makes a DESeqDataSet object with count data, experimental design, and no design formula
+counts_SF <- estimateSizeFactors(countMat) #  estimates the size factors using the "median ratio method" described by Equation 5 in Anders and Huber (2010)
+
+# make dataframe of the size factors to visualize
+sizeFactors <- data.frame(sample = counts_SF@colData@listData[["Sample"]], treat = counts_SF@colData@listData[["Treatment"]], sizeFactors = counts_SF@colData@listData[["sizeFactor"]])
+cbPalette<- c("Control" = "gray40","Heat" = "coral1")
+# plot sizeFactors
+ggplot(data = sizeFactors, aes(x = sample, y = sizeFactors, fill = treat)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_manual(values=cbPalette) +
+  #scale_fill_brewer(palette = 2, type = "qual") +
+  geom_bar(stat = "identity") +
+  ggtitle("corrected_Unfiltered sizeFactors")
+ggsave("FigSXX_Heat_Pacuta_corrected_host_sizeFactor.pdf", width = 8.5, height = 3)
+dev.off
+```
+
+
+```{r}
+str(coldata)
+#Perform PCA on variance-stabilized data (vsd), including "age" as a grouping variable
+pcaData <- plotPCA(vsd, intgroup = c("Treatment","Algae_type", "Genotype","Gen_Algae"), returnData = TRUE)
+# extract variance for all PCs
+percentVar <- round((100 * attr(pcaData, "percentVar")), 2)
+percentVar
+
+```
+
+```{r}
+# run the PERMANOVA with euclidean distances and 1500 iterations
+#head(pcaData[6:30])
+GE_pca <- adonis2(pcaData[1:2] ~pcaData$Treatment + pcaData$Algae_type + pcaData$Genotype + pcaData$Treatment:pcaData$Algae_type+pcaData$Treatment:pcaData$Genotype, method = 'eu', permutations = 1500)
+GE_pca
+```
+```{r}
+# Perform PCA on variance-stabilized data (vsd), including "age" as a grouping variable
+pcaData <- plotPCA(vsd, intgroup = c("Treatment","Algae_type", "Genotype","Gen_Algae"), returnData = TRUE)
+pcaData
+
+# Extract variance for all PCs
+percentVar <- round((100 * attr(pcaData, "percentVar")), 2)
+percentVar
+
+# Run PERMANOVA with Euclidean distances and 1500 iterations on filtered control data
+GE_pca <- adonis2(pcaData[1:2] ~ pcaData$Treatment*pcaData$Algae_type+pcaData$Genotype+ pcaData$Treatment:pcaData$Genotype, 
+                  method = 'eu', permutations = 1500)
+GE_pca
+colvec<- c("control" = "gray40","heat" = "coral1")
+#pcaData$Treatment                     1   4717.6 0.75137 491.682 0.0006662 ***
+#pcaData$Algae_type                    1     42.9 0.00683   4.467 0.0399734 *  
+#pcaData$Genotype                      1    168.2 0.02678  17.527 0.0013324 ** 
+#pcaData$Treatment:pcaData$Algae_type  1    545.7 0.08691  56.871 0.0006662 ***
+#pcaData$Treatment:pcaData$Genotype    1    689.2 0.10977  71.832 0.0006662 ***             
+#---
+#Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+```
+
+```{r}
+pcaData$Treatment<-as.factor(pcaData$Treatment)
+pcaData$Genotype<-as.factor(pcaData$Genotype)
+pcaData$Algae_type<-as.factor(pcaData$Algae_type)
+pcaData$Gen_Algae<-as.factor(pcaData$Gen_Algae)
+##
+shapes = c("gen1_C" = 21, "gen3_D" = 22, "gen4_D"=7)
+colvec<- c("Control" = "gray40","Heat" = "coral1")
+#points are overlapping with each other. Use jitter to make each point visible.
+pca_plot <- ggplot(pcaData, aes(PC1, PC2, shape = Gen_Algae, group = Treatment, fill = Treatment, colour = Treatment )) +
+  geom_jitter(size = 3, stroke = 0.7, alpha = 0.8) + # Add jitter to reduce overlap
+  theme_bw() +
+  stat_ellipse(geom = "polygon", alpha = 0.15, aes(fill = Treatment), show.legend = FALSE) + # Keep ellipses behind points
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar[2], "%)")) +
+  scale_shape_manual(values = shapes) +
+  theme(legend.position = "right") # Adjust legend position for clarity
+pca_plot
+
+ggsave("FigSXX_Pacuta_corrected_host.pdf", width = 5, height = 4)
+dev.off
+pca_plot
+```
+
+```{r}
+#extract control only from the correcte matrix 
+# Also, ensure you filter 'coldata' to match the filtered 'data'
+c_coldata <- coldata[coldata$Algae_type == "C",]
+# Assuming 'coldata' has the same ordering as 'corrected_data' columns
+# Extract columns where Treatment is 'Control'
+c_corrected_data <- corrected_data[, coldata$Algae_type == "C"]
+#run deseq
+dds<-DESeq2::DESeqDataSetFromMatrix(countData = c_corrected_data, colData = c_coldata, design=~Treatment)
+keep.corr = rowSums(counts(dds) >= 2) >= 4 # at least 4 samples (80%) with a count of 2 or higher
+dds = dds[keep.corr,]
+dds <- DESeq2::DESeq(dds)
+#C pairwise comparisons
+c_coldata$Treatment<-factor(c_coldata$Treatment, levels=c("Heat","Control"))
+res_Heat <- results(dds, contrast=c("Treatment","Heat","Control"))
+res_Heat
+#
+table(res_Heat$padj<0.05)
+#FALSE  TRUE 
+# 8866   495 
+summary(res_Heat, alpha=0.05)
+#out of 15289 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 184, 1.2%
+#LFC < 0 (down)     : 311, 2%
+#outliers [1]       : 0, 0%
+#low counts [2]     : 5928, 39%
+#(mean count < 9)
+res_Heat_fltd <- res_Heat[which(res_Heat$padj<0.05),]
+write.table(res_Heat, file="C_corrected_Heat_stress.txt", quote=F, sep="\t")
+```
+```{r}
+# C-only subset
+c_coldata <- coldata[coldata$Algae_type == "C", ]
+c_corrected_data <- corrected_data[, coldata$Algae_type == "C"]
+
+# make sure metadata matches count matrix
+rownames(c_coldata) <- c_coldata$Sample
+c_coldata <- c_coldata[colnames(c_corrected_data), ]
+
+# set factors
+c_coldata$Treatment <- factor(c_coldata$Treatment, levels = c("Control", "Heat"))
+c_coldata$Genotype <- factor(c_coldata$Genotype)
+c_coldata$Gen_Algae <- factor(c_coldata$Gen_Algae)
+
+# build DESeq object
+dds_c <- DESeq2::DESeqDataSetFromMatrix(
+  countData = c_corrected_data,
+  colData = c_coldata,
+  design = ~ Treatment
+)
+
+dds_c <- DESeq2::DESeq(dds_c)
+
+# VST
+vsd_c <- varianceStabilizingTransformation(dds_c, blind = TRUE)
+
+# PCA
+pcaData_c <- plotPCA(
+  vsd_c,
+  intgroup = c("Treatment", "Gen_Algae"),
+  returnData = TRUE
+)
+
+pcaData_c
+
+# variance explained
+percentVar_c <- round(100 * attr(pcaData_c, "percentVar"), 2)
+percentVar_c
+
+# PERMANOVA
+GE_pca_c <- adonis2(
+  pcaData_c[, 1:2] ~ Treatment,
+  data = pcaData_c,
+  method = "eu",
+  permutations = 1500
+)
+
+GE_pca_c
+#-----------------------------
+# PCA plot
+#-----------------------------
+pcaData_c$Treatment <- as.factor(pcaData_c$Treatment)
+pcaData_c$Genotype <- as.factor(pcaData_c$Genotype)
+pcaData_c$Gen_Algae <- as.factor(pcaData_c$Gen_Algae)
+
+colvec <- c("Control" = "gray40", "Heat" = "coral1")
+
+pca_plot_c <- ggplot(
+  pcaData_c,
+  aes(PC1, PC2, fill = Treatment, colour = Treatment)
+) +
+  geom_jitter(size = 3, stroke = 0.7, alpha = 0.8, width = 0.08, height = 0.08) +
+  theme_bw() +
+  stat_ellipse(
+    geom = "polygon",
+    alpha = 0.15,
+    aes(fill = Treatment, group = Treatment),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  xlab(paste0("PC1 (", percentVar_c[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar_c[2], "%)")) +
+  theme(legend.position = "right")
+
+pca_plot_c
+
+ggsave("FigSXX_Pacuta_C_only_PCA.pdf", plot = pca_plot_c, width = 5, height = 4)
+```
+
+
+```{r}
+#extract D only from the original matrix
+coldata<-read.csv("Pacuta_sample_info_nb.csv")
+#read in counts 
+data <- read.delim2("Pacuta_holobiont_counts_host.txt",header = T, row.names = 1)
+data[data < 0]<- NA
+data<- na.omit(data)
+coldata$Genotype<-as.factor(coldata$Genotype)
+# Also, ensure you filter 'coldata' to match the filtered 'data'
+d_coldata <- coldata[coldata$Algae_type == "D",]
+# Assuming 'coldata' has the same ordering as 'corrected_data' columns
+# Extract columns where Treatment is 'Control'
+d_corrected_data <- data[, coldata$Algae_type == "D"]
+#run deseq
+dds<-DESeq2::DESeqDataSetFromMatrix(countData = d_corrected_data, colData = d_coldata, design=~Treatment*Genotype)
+dds <- DESeq2::DESeq(dds)
+```
+
+```{r}
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE) # quickly estimate dispersion trend and apply a
+# Perform PCA on variance-stabilized data (vsd), including "age" as a grouping variable
+pcaData <- plotPCA(vsd, intgroup = c("Treatment","Genotype"), returnData = TRUE)
+pcaData
+
+#Extract variance for all PCs
+percentVar <- round((100 * attr(pcaData, "percentVar")), 2)
+percentVar
+
+# Run PERMANOVA with Euclidean distances and 1500 iterations on filtered control data
+GE_pca <- adonis2(pcaData[1:2] ~ pcaData$Treatment*pcaData$Genotype, 
+                  method = 'eu', permutations = 1500)
+GE_pca
+#                                   Df SumOfSqs      R2        F    Pr(>F)    
+#pcaData$Treatment                   1   4607.8 0.40143 430.8386 0.0006662 ***
+#pcaData$Genotype                    1   6695.9 0.58334 626.0840 0.0006662 ***
+#pcaData$Treatment:pcaData$Genotype  1     89.3 0.00778   8.3457 0.0046636 ** 
+##Residual                            8     85.6 0.00745                       
+#Total                              11  11478.5 1.00000  
+```
+```{r}
+colvec<- c("Control" = "gray40","Heat" = "coral1")
+pcaData$Genotype
+#shapes = c("ECAH"=21,"ECG"=22,"ORAPG"=24, "P2"=25, "P3"=8)
+pcaData$Treatment<-as.factor(pcaData$Treatment)
+pcaData$Genotype<-as.factor(pcaData$Genotype)
+shapes = c("gen3_" = 22, "gen4_"= 24)
+colvec<- c("Control" = "gray40","Heat" = "coral1")
+#points are overlapping with each other. Use jitter to make each point visible.
+pca_plot2 <- ggplot(
+  pcaData,
+  aes(PC1, PC2,
+      group = Treatment,
+      fill = Treatment,
+      colour = Treatment,
+      shape = Genotype)
+) +
+  geom_jitter(size = 3, stroke = 0.7, alpha = 0.8, width = 0.15, height = 0.15) +
+  theme_bw() +
+  stat_ellipse(
+    geom = "polygon",
+    alpha = 0.15,
+    aes(fill = Treatment),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar[2], "%)")) +
+  theme(legend.position = "right")
+
+pca_plot2
+ggsave("FigSXX_Pacuta_D_only_PCA_raw.pdf", plot = pca_plot2, width = 5, height = 4)
+```
+
+
+```{r}
+#d pairwise comparisons heat vs control
+d_coldata$Treatment<-factor(d_coldata$Treatment, levels=c("Heat","Control"))
+res_d_Heat <- results(dds, contrast=c("Treatment","Heat","Control"))
+res_d_Heat
+#
+table(res_d_Heat$padj<0.05)
+#FALSE  TRUE 
+#13517  2398 
+summary(res_d_Heat, alpha=0.05)
+#out of 24737 with nonzero total read count
+#adjusted p-value < 0.05
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 1122, 4.5%
+#LFC < 0 (down)     : 1276, 5.2%
+#outliers [1]       : 2, 0.0081%
+#low counts [2]     : 9879, 40%
+res_d_Heat_fltd <- res_d_Heat[which(res_d_Heat$padj<0.05),]
+write.table(res_d_Heat_fltd, file="FigSXX_D_Heat_stress.txt", quote=F, sep="\t")
+```
+
+```{r}
+#redo C separately #model Treatment only
+# Also, ensure you filter 'coldata' to match the filtered 'data'
+c_coldata <- coldata[coldata$Algae_type == "C",]
+# Assuming 'coldata' has the same ordering as 'corrected_data' columns
+# Extract columns where Treatment is 'Control'
+c_corrected_data <- data[, coldata$Algae_type == "C"]
+#run deseq
+dds<-DESeq2::DESeqDataSetFromMatrix(countData = c_corrected_data, colData = c_coldata, design=~Treatment)
+keep.corr = rowSums(counts(dds) >= 5) >= 4 # at least 14 samples (80%) with a count of 2 or higher
+dds = dds[keep.corr,]
+dds <- DESeq2::DESeq(dds)
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE)
+```
+
+
+```{r}
+# Perform PCA on variance-stabilized data (vsd), including "age" as a grouping variable
+# PCA
+pcaData <- plotPCA(vsd, intgroup = c("Treatment","Genotype"), returnData = TRUE)
+pcaData
+
+# percent variance
+percentVar <- round(100 * attr(pcaData, "percentVar"), 2)
+percentVar
+
+# PERMANOVA on PC1 and PC2
+GE_pca <- vegan::adonis2(
+  pcaData[, 1:2] ~ Treatment,
+  data = pcaData,
+  method = "euclidean"
+)
+
+GE_pca
+
+```
+```{r}
+colvec<- c("Control" = "gray40","Heat" = "coral1")
+pcaData$Genotype
+#shapes = c("ECAH"=21,"ECG"=22,"ORAPG"=24, "P2"=25, "P3"=8)
+pcaData$Treatment<-as.factor(pcaData$Treatment)
+pcaData$Genotype<-as.factor(pcaData$Genotype)
+shapes = c("gen1_" = 21)
+colvec<- c("Control" = "gray40","Heat" = "coral1")
+#points are overlapping with each other. Use jitter to make each point visible.
+pca_plot2 <- ggplot(
+  pcaData,
+  aes(PC1, PC2,
+      group = Treatment,
+      fill = Treatment,
+      colour = Treatment,
+      shape = Genotype)
+) +
+  geom_jitter(size = 3, stroke = 0.7, alpha = 0.8, width = 0.15, height = 0.15) +
+  theme_bw() +
+  stat_ellipse(
+    geom = "polygon",
+    alpha = 0.15,
+    aes(fill = Treatment),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar[2], "%)")) +
+  theme(legend.position = "right")
+
+pca_plot2
+ggsave("FigSXX_Pacuta_C_only_PCA_raw.pdf", plot = pca_plot2, width = 5, height = 4)
+```
+
+
+```{r}
+#d pairwise comparisons heat vs control
+c_coldata$Treatment<-factor(c_coldata$Treatment, levels=c("Heat","Control"))
+res_c_Heat <- results(dds, contrast=c("Treatment","Heat","Control"))
+res_c_Heat
+#
+table(res_c_Heat$padj<0.05)
+#FALSE  TRUE 
+# 9872   649 
+summary(res_c_Heat, alpha=0.05)
+#LFC > 0 (up)       : 212, 1.8%
+#LFC < 0 (down)     : 437, 3.7%
+#outliers [1]       : 2, 0.017%
+#low counts [2]     : 1386, 12%
+res_c_Heat_fltd <- res_c_Heat[which(res_c_Heat$padj<0.05),]
+write.table(res_c_Heat_fltd , file="FigSXX_C_Heat_stress.txt", quote=F, sep="\t")
+write.table(res_c_Heat , file="FigSXX_C_Heat_stress_ALL.txt", quote=F, sep="\t")
+```
+
+
+
+```{r}
+# Categorize the genes as upregulated or downregulated
+# Function to categorize and summarize data
+summarize_data <- function(data, label) {
+  data$regulation <- ifelse(data$log2FoldChange > 0, "Upregulated", "Downregulated")
+  summary_data <- as.data.frame(table(data$regulation))
+  colnames(summary_data) <- c("Regulation", "Count")
+  summary_data$Dataset <- label
+  return(summary_data)
+}
+# Summarize each data frame
+Heat <- summarize_data(res_d_Heat_fltd, "Heat")
+col<-c("Upregulated"="coral1","Downregulated"="grey40")
+# Create the combined stacked bar plot
+ggplot(Heat, aes(x = Regulation, y = Count, fill = Regulation)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(x = "Treatment",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_manual(values = col)+coord_flip()+geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "grey")
+
+# Summarize each data frame
+Clad <- summarize_data(res_c_Heat_fltd, "Cladocopium")
+col<-c("Upregulated"="coral1","Downregulated"="grey40")
+# Create the combined stacked bar plot
+Clad$Regulation<-as.factor(Clad$Regulation)
+cl<-ggplot(Clad, aes(x = Regulation, y = Count, fill = Regulation)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(x = "Treatment",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_manual(values = col)+coord_flip()+geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "grey")
+cl
+# Summarize each data frame
+Duris <- summarize_data(res_d_Heat_fltd, "Durisdinium")
+Duris$Regulation<-as.factor(Duris$Regulation)
+col<-c("Upregulated"="Red","Downregulated"="Blue")
+# Create the combined stacked bar plot
+du<-ggplot(Duris, aes(x = Regulation, y = Count, fill = Regulation)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(x = "Treatment",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_manual(values = col)+coord_flip()+geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "grey")
+```
+
+```{r}
+# Assuming summarize_data function returns a dataframe with 'Regulation' and 'Count'
+Clad <- summarize_data(res_c_Heat_fltd, "Cladocopium")
+Clad$Source <- "Cladocopium"
+
+Duris <- summarize_data(res_d_Heat_fltd, "Durisdinium")
+Duris$Source <- "Durisdinium"
+
+# Combine data
+combined_data <- rbind(Clad, Duris)
+col<-c("Downregulated"="grey40","Upregulated"="coral1")
+combined_data <- combined_data %>%
+  mutate(
+    Regulation = factor(
+      Regulation,
+      levels = c("Downregulated", "Upregulated")
+    )
+  )
+combined_plot <- ggplot(combined_data, aes(x = Source, y = Count, fill = Regulation)) +
+  geom_bar(stat = "identity") +
+  #facet_wrap(~ Source, scales = "free_y") +  # Use facet_wrap to create separate panels for each Source
+  theme_classic() +
+  labs(x = "Algae association", y = "Gene count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = col) +
+  coord_flip() +
+  geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "grey")
+# Print the plot
+print(combined_plot)
+ggsave("FigSXX_Pacuta_DE_barplot.pdf", width = 5, height = 4)
+dev.off
+```
+
+```{r}
+# install.packages("VennDiagram")   # if you haven’t already
+library(VennDiagram)
+
+# read matrices
+d <- read.table("D_Heat_stress.txt", header = TRUE, row.names = 1, sep = "\t")
+c <- read.table("C_Heat_stress.txt", header = TRUE, row.names = 1, sep = "\t")
+
+#Subset to significant genes (e.g. padj < 0.05), dropping NAs:
+sigD <- subset(d, !is.na(padj) & padj < 0.05)
+sigC <- subset(c, !is.na(padj) & padj < 0.05)
+
+# extract DE regulated gene names:
+upD   <- rownames(sigD)[sigD$log2FoldChange >  0]
+downD <- rownames(sigD)[sigD$log2FoldChange <  0]
+upC   <- rownames(sigC)[sigC$log2FoldChange >  0]
+downC <- rownames(sigC)[sigC$log2FoldChange <  0]
+
+# install.packages("ggvenn")
+library(ggvenn)
+# define your palette
+palette <- c(downC = "brown4",downD = "darkgreen")
+up_list   <- list(D = upD,   C = upC)
+down_list <- list(D = downD, C = downC)
+library("ggVennDiagram")
+# Upregulated
+upreg<-ggvenn(up_list, c("C","D"),fill_color = c("brown4","darkgreen")) + ggtitle("Upregulated Genes")
+upreg
+# downregulated
+downreg<-ggvenn(down_list, c("C","D"),fill_color = c("brown4","darkgreen")) + ggtitle("Downregulated Genes")
+downreg
+
+# Combine plots
+combined <- ggarrange(upreg, downreg, 
+                           ncol = 1, nrow = 2, # Define the layout: 2 columns, 2 rows
+                           labels = c("A", "B"), # Label each plot
+                           common.legend = TRUE, legend = "bottom") # Common legend at the bottom
+
+# Print the combined plot
+print(combined)
+pdf(file = "DE_venn_diagram.pdf",width = 5, height = 4)
+combined
+dev.off
+```
+
+
+```{r}
+#Durusdinium
+data_dge<-read.delim("FigSXX_D_Heat_stress.txt", header=TRUE, row.names=1)
+# Move row names to a column named 'Gene'
+data_dge$Gene <- rownames(data_dge)
+
+
+# Adjust pvalue based on the sign of log2FoldChange
+#gomwu suggest to use "form of "signed negative log p-values". These measures are negative decimal logarithms of the raw (uncorrected) p-value for each gene, multiplied by -1 if the gene was down-regulated. As a result, highly significant up-regulated genes get highly positive values, and highly significant down-regulated genes get highly negative values." from Misha Matz file
+# Create clean DGE matrix for GO analysis
+data_dge$Gene <- rownames(data_dge)
+data_dge <- data_dge[, c("Gene", setdiff(names(data_dge), "Gene"))]
+
+# Filter by adjusted p-value and create signed log p-value
+data_dge <- data_dge %>%
+  filter(padj < 0.05) %>%
+  mutate(
+    signedlogP = case_when(
+      log2FoldChange > 0 ~ -log10(pvalue),
+      log2FoldChange < 0 ~ log10(pvalue),
+      TRUE ~ 0
+    )
+  )
+
+# Create final matrix for GO_MWU
+dge_matrix_gomwu <- data_dge[, c("Gene", "signedlogP")]
+rownames(dge_matrix_gomwu) <- NULL
+
+# Export
+options(scipen = 999)
+write.csv(dge_matrix_gomwu, file = "dge_Dur_heat_gomwu.csv", 
+          quote = FALSE, row.names = FALSE)
+options(scipen = 0)
+```
+
+```{r}
+diff_expr_matrix <- data_dge
+str(diff_expr_matrix)
+volcano_data <- data.frame(
+    Gene = diff_expr_matrix$Gene,  # This is incorrect because row.names will not exist.
+    log2FoldChange = diff_expr_matrix$log2FoldChange,
+    padj = diff_expr_matrix$padj
+)
+
+# The significantly differentially expressed genes are the ones found in the upper-left and upper-right corners.
+# Add a column to the data frame to specify if they are UP- or DOWN- regulated (log2FoldChange respectively positive or negative)
+
+# add a column of NAs
+volcano_data$diffexpressed <- "Not significant"
+
+# if log2Foldchange > 0 and pvalue < 0.1, set as "UP" 
+volcano_data$diffexpressed[volcano_data$log2FoldChange > 0 & volcano_data$padj < 0.05] <- "UP"
+# if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+volcano_data$diffexpressed[volcano_data$log2FoldChange < -0 & volcano_data$padj < 0.05] <- "DOWN"
+data_count_1 <- aggregate(data = volcano_data,                # Applying aggregate
+                          Gene ~ diffexpressed,
+                          function(x) length(unique(x)))
+data_count_1  
+# Re-plot but this time color the points with "diffexpressed"
+p <- ggplot(data=volcano_data, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + geom_point() + theme_bw()
+p
+## Change point color 
+# 1. by default, it is assigned to the categories in an alphabetical order):
+p1 <- p + scale_color_manual(values=c("grey40", "coral1"))
+p1
+ggsave("Dur_heat_volcano_plot.pdf", width = 4.5, height = 2.5)
+```
+
+
+```{r}
+#start GOMWU
+#notes when running GOMWU: the input data file should list all genes that were used in WGCNA; the genes that are not included in the module should receive a significance measure of 0, and genes within the module - a kME (correlation) values from WGCNA. If you are analysing signed WGCNA modules, add 'Module=TRUE,Alternative="g"' option when running gomwuStats(); for unsigned modules, just 'Module=TRUE' (see comments in the GO_MWU.R script).
+```
+
+
+```{r}
+goDatabase="go.obo"
+goDivision="BP"
+source("gomwu.functions.R")
+goAnnotations="Pocillopora_acuta_final.isotab"
+#GOMWU analysis of Dur/Cla
+#im gonna be using all dge files here.
+
+dur_cla="dge_Dur_heat_gomwu.csv"
+gomwuStats(dur_cla, goDatabase, goAnnotations, goDivision,
+           perlPath="perl",
+           largest=0.25,
+           smallest=50,
+           clusterCutHeight=0.25)
+#go_nrify:
+#7824 categories, 903 genes; size range 50-225.75
+#	86 too broad
+#	7324 too small
+#	414 remaining
+
+#removing redundancy:
+
+#calculating GO term similarities based on shared genes...
+#253 non-redundant GO categories of good size
+#-------------
+
+#Secondary clustering:
+#calculating similarities....
+#Continuous measure of interest: will perform MWU test
+#184  GO terms at 10% FDR
+
+```
+
+
+```{r}
+pdf("DurvsHeat_GOMWU_BP_heat.pdf", height = 35, width = 8)
+gomwuPlot(dur_cla,goAnnotations,goDivision,
+                  absValue=-log(0.05,10),  # genes with the measure value exceeding this will be counted as "good genes". This setting is for signed log-pvalues. Specify absValue=0.001 if you are doing Fisher's exact test for standard GO enrichment or analyzing a WGCNA module (all non-zero genes = "good genes").
+                  #	absValue=1, # un-remark this if you are using log2-fold changes
+                  level1=0.05, # FDR threshold for plotting. Specify level1=1 to plot all GO categories containing genes exceeding the absValue.
+                  level2=0.01, # FDR cutoff to print in regular (not italic) font.
+                  level3=0.001, # FDR cutoff to print in large bold font.
+                  txtsize=2,    # decrease to fit more on one page, or increase (after rescaling the plot so the tree fits the text) for better "word cloud" effect
+                  treeHeight=0.35, # height of the hierarchical clustering tree
+                  colors=c("grey40", "coral1","grey40", "coral1") # these are default colors, un-remar and change if needed
+)
+dev.off()
+```
+```{r}
+#Cladocopium
+data_dge<-read.delim("FigSXX_C_Heat_stress_ALL.txt", header=TRUE, row.names=1)
+# Move row names to a column named 'Gene'
+data_dge$Gene <- rownames(data_dge)
+
+
+# Adjust pvalue based on the sign of log2FoldChange
+#gomwu suggest to use "form of "signed negative log p-values". These measures are negative decimal logarithms of the raw (uncorrected) p-value for each gene, multiplied by -1 if the gene was down-regulated. As a result, highly significant up-regulated genes get highly positive values, and highly significant down-regulated genes get highly negative values." from Misha Matz file
+# Create clean DGE matrix for GO analysis
+data_dge$Gene <- rownames(data_dge)
+data_dge <- data_dge[, c("Gene", setdiff(names(data_dge), "Gene"))]
+
+# Filter by adjusted p-value and create signed log p-value
+data_dge <- data_dge %>%
+  mutate(
+    signedlogP = case_when(
+      log2FoldChange > 0 ~ -log10(pvalue),
+      log2FoldChange < 0 ~ log10(pvalue),
+      TRUE ~ 0
+    )
+  )
+data_dge<-mutate(data_dge,signedlogP=case_when(log2FoldChange<0 ~ Spvalue, log2FoldChange>0 ~ Spvalue*-1))
+# Create final matrix for GO_MWU
+dge_matrix_gomwu <- data_dge[, c("Gene", "signedlogP")]
+rownames(dge_matrix_gomwu) <- NULL
+
+# Export
+options(scipen = 999)
+write.csv(dge_matrix_gomwu, file = "dge_Clad_heat_gomwu.csv", 
+          quote = FALSE, row.names = FALSE)
+options(scipen = 0)
+```
+
+```{r}
+diff_expr_matrix <- data_dge
+str(diff_expr_matrix)
+volcano_data <- data.frame(
+    Gene = diff_expr_matrix$Gene,  # This is incorrect because row.names will not exist.
+    log2FoldChange = diff_expr_matrix$log2FoldChange,
+    padj = diff_expr_matrix$padj
+)
+
+# The significantly differentially expressed genes are the ones found in the upper-left and upper-right corners.
+# Add a column to the data frame to specify if they are UP- or DOWN- regulated (log2FoldChange respectively positive or negative)
+
+# add a column of NAs
+volcano_data$diffexpressed <- "Not significant"
+
+# if log2Foldchange > 0 and pvalue < 0.1, set as "UP" 
+volcano_data$diffexpressed[volcano_data$log2FoldChange > 0 & volcano_data$padj < 0.05] <- "UP"
+# if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+volcano_data$diffexpressed[volcano_data$log2FoldChange < -0 & volcano_data$padj < 0.05] <- "DOWN"
+data_count_1 <- aggregate(data = volcano_data,                # Applying aggregate
+                          Gene ~ diffexpressed,
+                          function(x) length(unique(x)))
+data_count_1  
+# Re-plot but this time color the points with "diffexpressed"
+p <- ggplot(data=volcano_data, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + geom_point() + theme_bw()
+p
+## Change point color 
+# 1. by default, it is assigned to the categories in an alphabetical order):
+p1 <- p + scale_color_manual(values=c("grey40","black", "coral1"))
+p1
+ggsave("Clad_heat_volcano_plot.pdf", width = 4.5, height = 2.5)
+```
+
+
+```{r}
+#start GOMWU
+#notes when running GOMWU: the input data file should list all genes that were used in WGCNA; the genes that are not included in the module should receive a significance measure of 0, and genes within the module - a kME (correlation) values from WGCNA. If you are analysing signed WGCNA modules, add 'Module=TRUE,Alternative="g"' option when running gomwuStats(); for unsigned modules, just 'Module=TRUE' (see comments in the GO_MWU.R script).
+```
+
+
+```{r}
+goDatabase="go.obo"
+goDivision="BP"
+source("gomwu.functions.R")
+goAnnotations="Pocillopora_acuta_final.isotab"
+#GOMWU analysis of Dur/Cla
+#im gonna be using all dge files here.
+
+dur_cla="dge_Clad_heat_gomwu.csv"
+gomwuStats(dur_cla, goDatabase, goAnnotations, goDivision,
+           perlPath="perl",
+           largest=0.25,
+           smallest=50,
+           clusterCutHeight=0.25)
+
+
+```
+
+
+```{r}
+pdf("CladvsHeat_GOMWU_BP_heat.pdf", height = 10, width = 8)
+gomwuPlot(dur_cla,goAnnotations,goDivision,
+                  absValue=-log(0.05,10),  # genes with the measure value exceeding this will be counted as "good genes". This setting is for signed log-pvalues. Specify absValue=0.001 if you are doing Fisher's exact test for standard GO enrichment or analyzing a WGCNA module (all non-zero genes = "good genes").
+                  #	absValue=1, # un-remark this if you are using log2-fold changes
+                  level1=0.05, # FDR threshold for plotting. Specify level1=1 to plot all GO categories containing genes exceeding the absValue.
+                  level2=0.01, # FDR cutoff to print in regular (not italic) font.
+                  level3=0.001, # FDR cutoff to print in large bold font.
+                  txtsize=2,    # decrease to fit more on one page, or increase (after rescaling the plot so the tree fits the text) for better "word cloud" effect
+                  treeHeight=0.25, # height of the hierarchical clustering tree
+                  colors=c("grey40", "coral1","grey40", "coral1") # these are default colors, un-remar and change if needed
+)
+dev.off()
+```
+
+
+
