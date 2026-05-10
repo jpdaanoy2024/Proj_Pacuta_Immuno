@@ -1,0 +1,458 @@
+---
+title: "Infection_analysis"
+author: "JK"
+date: "2025-03-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#load packages
+library("tidyverse")
+library("ggplot2")
+library("tidyr")
+library("dplyr")
+library("cowplot")
+library("chisq.posthoc.test")
+library("RVAideMemoire")
+library("stats")
+library("ggsignif")
+library("lme4")
+library("forcats")
+library("emmeans")
+library("patchwork")
+library("performance")
+library("lattice")
+library("car")
+library("grid")
+library(knitr)
+library(dplyr)
+library(survival)
+library(ggplot2)
+library(tibble)
+library(survival)
+library(ggplot2)
+library(survminer)
+```
+
+
+```{r, echo=FALSE}
+#set working directory
+shapes = c("ECAH" = 21, "ECG" = 22, "ORAPG"=24)
+colvec<- c("control" = "grey1","infected" = "goldenrod1")
+# Apply the custom function to create a new column with color codes
+```
+
+
+```{r}
+loss<-read.csv("Infection_tissue_loss.csv")#%>%
+# dplyr::select(-g,-b)
+str(loss)
+#make na new column called algae type to code if genotype host cladocopium, or durisdinium
+loss <- loss %>%
+  mutate(algae_type = case_when(
+    gen == "ECAH" ~ "Cladocopium",
+    gen == "ECG" ~ "Durisdinium",
+    gen == "ORAPG" ~ "Durisdinium",
+    TRUE ~ NA_character_  # Assigns NA to cases where none of the above conditions are met
+  ))
+loss <- loss[loss$gen != "ORAG", ]
+loss$day<-as_factor(loss$day)
+loss$treatment<-as_factor(loss$treatment)
+loss$genotype<-as_factor(loss$gen)
+loss$treatment<-as_factor(loss$treatment)
+loss$algae_type<-as_factor(loss$algae_type)
+#filter day 7 only
+loss_final<- loss %>% filter(day == 7)
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(readr)
+
+shapes <- c("ECAH" = 21, "ECG" = 22, "ORAPG" = 24)
+colvec <- c("control" = "grey40", "infected" = "goldenrod1")
+
+loss <- read.csv("Infection_tissue_loss.csv")
+
+str(loss)
+
+# create algae type
+loss <- loss %>%
+  mutate(
+    algae_type = case_when(
+      gen == "ECAH"  ~ "Cladocopium",
+      gen == "ECG"   ~ "Durusdinium",
+      gen == "ORAPG" ~ "Durusdinium",
+      TRUE ~ NA_character_
+    )
+  )
+
+# remove unwanted genotype if needed
+loss <- loss %>%
+  filter(gen != "ORAG")
+
+# make variables factors
+loss <- loss %>%
+  mutate(
+    day = as.factor(day),
+    treatment = as.factor(treatment),
+    genotype = as.factor(gen),
+    algae_type = as.factor(algae_type)
+  )
+
+# filter day 7 only
+loss_final <- loss %>%
+  filter(day == "7")
+
+# summarize for bar plot
+loss_summary <- loss_final %>%
+  group_by(algae_type, treatment) %>%
+  summarise(
+    mean_loss = mean(percent_tissue_loss, na.rm = TRUE),
+    sd_loss = sd(percent_tissue_loss, na.rm = TRUE),
+    n = sum(!is.na(percent_tissue_loss)),
+    se_loss = sd_loss / sqrt(n),
+    .groups = "drop"
+  )
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readr)
+
+sym_cols <- c(Cladocopium = "brown4", Durusdinium = "darkgreen")
+bg_cols  <- c(control = "gray40", infected = "goldenrod1")
+shapes   <- c("ECAH" = 21, "ECG" = 22, "ORAPG" = 24)
+
+loss <- read.csv("Infection_tissue_loss.csv")
+
+loss <- loss %>%
+  mutate(
+    algae_type = case_when(
+      gen == "ECAH"  ~ "Cladocopium",
+      gen == "ECG"   ~ "Durusdinium",
+      gen == "ORAPG" ~ "Durusdinium",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(gen != "ORAG") %>%
+  mutate(
+    day = as.factor(day),
+    treatment = factor(treatment, levels = c("control", "infected")),
+    gen = factor(gen, levels = c("ECAH", "ECG", "ORAPG")),
+    algae_type = factor(algae_type, levels = c("Cladocopium", "Durusdinium"))
+  )
+
+loss_final <- loss %>%
+  filter(day == "7")
+
+tissue_loss_fin <- ggplot(loss_final, aes(x = treatment, y = percent_tissue_loss)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["infected"], alpha = 0.30) +
+  geom_boxplot(
+    aes(fill = algae_type, group = interaction(treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(fill = algae_type, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9),
+    size = 4,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  scale_shape_manual(values = shapes) +
+  theme_classic() +
+  labs(
+    x = "Treatment",
+    y = "Percent tissue loss",
+    fill = "Symbiont",
+    color = "Symbiont",
+    shape = "Genotype"
+  ) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1)
+  )
+pdf("tissue_loss.pdf", height = 4, width = 6)
+print(tissue_loss_fin)
+dev.off()
+```
+
+
+
+
+```{r}
+losslm <-lm(percent_tissue_loss~treatment*gen, data = loss_final)
+Anova(losslm)
+```
+
+```{r}
+emmeans(losslm, list(pairwise ~ treatment+gen), adjust = "tukey")
+```
+
+```{r}
+losslm <-lm(percent_tissue_loss~treatment*algae_type*day, data = loss)
+Anova(losslm)
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+
+sym_cols <- c(Cladocopium = "brown4", Durusdinium = "darkgreen")
+bg_cols  <- c(control = "gray40", infected = "goldenrod1")
+colvec   <- c(control = "gray40", infected = "goldenrod1")
+shapes   <- c("ECAH" = 21, "ECG" = 22, "ORAPG" = 24)
+
+loss <- read.csv("Infection_tissue_loss.csv")
+
+loss <- loss %>%
+  mutate(
+    algae_type = case_when(
+      gen == "ECAH"  ~ "Cladocopium",
+      gen == "ECG"   ~ "Durusdinium",
+      gen == "ORAPG" ~ "Durusdinium",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(gen != "ORAG") %>%
+  mutate(
+    day = factor(day),
+    day_num = as.numeric(as.character(day)),
+    treatment = factor(treatment, levels = c("control", "infected")),
+    gen = factor(gen, levels = c("ECAH", "ECG", "ORAPG")),
+    algae_type = factor(algae_type, levels = c("Cladocopium", "Durusdinium"))
+  )
+
+tissue_loss_all <- ggplot(loss, aes(x = day, y = percent_tissue_loss)) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["control"], alpha = 0.10) +
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           fill = bg_cols["infected"], alpha = 0.30) +
+  geom_boxplot(
+    aes(fill = algae_type, group = interaction(treatment, gen)),
+    position = position_dodge(width = 0.8),
+    outlier.shape = NA,
+    width = 0.6,
+    alpha = 0.7
+  ) +
+  geom_point(
+    aes(fill = algae_type, color = algae_type, shape = gen),
+    position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.8),
+    size = 4,
+    stroke = 1,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = sym_cols) +
+  scale_color_manual(values = sym_cols) +
+  scale_shape_manual(values = shapes) +
+  theme_classic() +
+  labs(
+    x = "Treatment",
+    y = "Percent tissue loss",
+    fill = "Symbiont",
+    color = "Symbiont",
+    shape = "Genotype"
+  ) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1)
+  )+facet_wrap(~algae_type)
+
+tissue_loss_all
+tissue_loss_all
+```
+
+
+
+```{r}
+emmeans(losslm, list(pairwise ~ treatment+algae_type|day), adjust = "tukey")
+```
+
+
+```{r}
+infect <- read.csv("Infection_mortality.csv", header=T)
+str(infect)
+infect <- infect %>%
+  mutate(gen = case_when(
+    gen == "Gen1:C" ~ "ECAH",
+    gen == "Gen4:C" ~ "ECG",
+    gen == "Gen4:D" ~ "ORAPG",
+    TRUE ~ gen  # Keeps original values for all other cases
+  ))
+#make na new column called algae type to code if genotype host cladocopium, or durisdinium
+infect <- infect %>%
+  mutate(algae_type = case_when(
+    gen == "ECAH" ~ "Cladocopium",
+    gen == "ECG" ~ "Durisdinium",
+    gen == "ORAPG" ~ "Durisdinium",
+    TRUE ~ NA_character_  # Assigns NA to cases where none of the above conditions are met
+  ))
+
+# Load necessary library
+library(survival)
+
+# Load necessary library
+library(survival)
+
+# Create an interaction term in the dataset
+infect$treat_algae_interact <- interaction(infect$treatment, infect$gen)
+
+# Prepare the survival fit object using the Surv function to create a survival object from your data
+# Now using the new interaction term 'treat_algae_interact' in the model
+infect_sfit <- survfit(Surv(day, mortality) ~ treat_algae_interact, data = infect)
+
+# Display the summary table of the survival fit object
+summary(infect_sfit)$table
+
+# Create separate survfit objects for treatment and algae_type for more detailed faceting
+infect_sfit_treatment <- survfit(Surv(day, mortality) ~ treatment, data = infect)
+infect_sfit_algae_type <- survfit(Surv(day, mortality) ~ algae_type, data = infect)
+```
+
+```{r}
+# Cox model
+str(infect)
+cox_poc <- coxph(Surv(day, mortality) ~treat_algae_interact, data = infect)
+summary(cox_poc)
+
+# Simplified model without interaction
+simple_cox <- coxph(Surv(day, mortality) ~ treatment * gen, data = infect)
+summary(simple_cox)
+
+# Check for zero or near-zero variance predictors
+library(caret)
+nearZeroVar(infect)
+
+# Examine the number of events per group
+table(infect$treatment, infect$mortality)
+table(infect$algae_type, infect$mortality)
+
+# If interaction is essential, consider stratification as an alternative approach
+strat_cox <- coxph(Surv(day, mortality) ~ treatment + strata(algae_type), data = infect)
+summary(strat_cox)
+
+```
+
+```{r}
+# Plotting the survival curves for treatment, faceted by algae_type
+ggsurvplot(
+  infect_sfit_treatment,       # Use the treatment survfit object
+  data = infect,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  palette = c("grey1", "goldenrod1"),  # Adjust based on the number of treatments
+  xlab = "Days",
+  ylab = "Survival Probability",
+  facet.by = "algae_type",     # Faceting by algae type
+  facet.scales = "free_y"      # Allows different y scales for each facet; use "fixed" if you want the same scale
+)
+ggsave("survival_plot.pdf", ,height = 4,width = 6)
+dev.off
+```
+```{r}
+library(dplyr)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(caret)
+
+infect <- read.csv("Infection_mortality.csv", header = TRUE)
+str(infect)
+
+infect <- infect %>%
+  mutate(
+    gen = case_when(
+      gen == "Gen1:C" ~ "ECAH",
+      gen == "Gen4:C" ~ "ECG",
+      gen == "Gen4:D" ~ "ORAPG",
+      TRUE ~ gen
+    )
+  )
+
+# make a new column called algae_type
+infect <- infect %>%
+  mutate(
+    algae_type = case_when(
+      gen == "ECAH"  ~ "Cladocopium",
+      gen == "ECG"   ~ "Durisdinium",
+      gen == "ORAPG" ~ "Durisdinium",
+      TRUE ~ NA_character_
+    )
+  )
+
+# make factors
+infect <- infect %>%
+  mutate(
+    treatment = factor(treatment, levels = c("control", "infected")),
+    gen = factor(gen, levels = c("ECAH", "ECG", "ORAPG")),
+    algae_type = factor(algae_type, levels = c("Cladocopium", "Durisdinium"))
+  )
+
+# interaction term
+infect$treat_algae_interact <- interaction(infect$treatment, infect$gen)
+
+# survival fit objects
+infect_sfit <- survfit(Surv(day, mortality) ~ treat_algae_interact, data = infect)
+summary(infect_sfit)$table
+
+infect_sfit_treatment <- survfit(Surv(day, mortality) ~ treatment, data = infect)
+infect_sfit_gen <- survfit(Surv(day, mortality) ~ gen, data = infect)
+
+# Cox model
+str(infect)
+cox_poc <- coxph(Surv(day, mortality) ~ treat_algae_interact, data = infect)
+summary(cox_poc)
+
+# simplified model without interaction
+simple_cox <- coxph(Surv(day, mortality) ~ treatment * gen, data = infect)
+summary(simple_cox)
+
+# check for zero or near-zero variance predictors
+nearZeroVar(infect)
+
+# examine number of events per group
+table(infect$treatment, infect$mortality)
+table(infect$gen, infect$mortality)
+
+# if interaction is essential, consider stratification as an alternative approach
+strat_cox <- coxph(Surv(day, mortality) ~ treatment + strata(gen), data = infect)
+summary(strat_cox)
+
+# Plotting the survival curves for treatment, faceted by genotype
+p <- ggsurvplot(
+  infect_sfit_treatment,
+  data = infect,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  palette = c("grey1", "goldenrod1"),
+  xlab = "Days",
+  ylab = "Survival Probability",
+  facet.by = "gen",
+  facet.scales = "free_y"
+)
+
+p
+
+ggsave("survival_plot_by_genotype.pdf", plot = print(p), height = 4, width = 6)
+```
+
+
+
+
+
+
+
+
