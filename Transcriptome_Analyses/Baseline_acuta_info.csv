@@ -1,0 +1,16 @@
+﻿Sample,Genotype,Symbiont,Platform
+ECAH1,ECAH,Cladocopium,TagSeq
+ECAH2,ECAH,Cladocopium,TagSeq
+ECAH3,ECAH,Cladocopium,TagSeq
+P2_a,P2,Cladocopium,Hiseq
+P2_b,P2,Cladocopium,Hiseq
+P2_c,P2,Cladocopium,Hiseq
+ECG1,ECG,Durisdinium,TagSeq
+ECG2,ECG,Durisdinium,TagSeq
+ECG3,ECG,Durisdinium,TagSeq
+ORAPG1,ORAPG,Durisdinium,TagSeq
+ORAPG2,ORAPG,Durisdinium,TagSeq
+ORAPG3,ORAPG,Durisdinium,TagSeq
+P3_a,P3,Durisdinium,Hiseq
+P3_b,P3,Durisdinium,Hiseq
+P3_c,P3,Durisdinium,Hiseq

@@ -1,0 +1,914 @@
+---
+title: "Reanalysis_Pacuta_baseline_Transcriptome"
+output: html_document
+date: "2026-03-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(htmltools)
+library(arrayQualityMetrics)
+library(DESeq2)
+library(tidyr)
+library(genefilter)
+library(cowplot)
+library(emmeans)
+library(gplots)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggtext)
+library(ape)
+library(vegan)
+library(RColorBrewer)
+#try combat-seq
+library(sva)
+```
+
+```{r}
+##analyse full matrix
+coldata<-read.csv("Baseline_acuta_info.csv")
+#read in counts 
+data <- read.delim2("Pacuta_holobiont_Baseline_host.txt",header = T, row.names = 1)
+#total transcript of host 33,730. i noticed a lot of genes are lowly expressed. <10 for a lot of samples. I wont include in analysis.
+data[data < 0]<- NA
+data<- na.omit(data)
+#min_count <- 10
+#min_samples <- 10
+min_count <- 0
+min_samples <- 0
+#use min count 10, 8378 remain 
+# Filter genes. remove low counts.
+data <- data[rowSums(data >= min_count) >= min_samples, ]
+```
+
+```{r}
+dds<-DESeq2::DESeqDataSetFromMatrix(countData = data, colData = coldata, design=~Symbiont)
+keep.corr = rowSums(counts(dds) >= 2) >= 9 # at least 14 samples (80%) with a count of 2 or higher
+dds = dds[keep.corr,]
+## saving the rlog for DEG heatmap
+rlog <- DESeq2::rlog(dds, blind = TRUE) #for use later on
+#save text
+rlog_matrix <- assay(rlog)
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE) # quickly estimate dispersion trend and apply a variance stabilizing transformation
+write.table(rlog_matrix, file = "Pacuta_COrrected_rlog_normalized_counts.txt", sep = "\t", quote = FALSE, col.names = NA)
+vsd_matrix <- assay(vsd)
+write.table(vsd_matrix, file = "Pacuta_COrrected_vsd_normalized_counts.txt", sep = "\t", quote = FALSE, col.names = NA)
+## Save dds and vsd data 
+save(data,dds, vsd, rlog, file = "pactua_noncombat_transformed_counts.RData")
+```
+```{r}
+#conduct outlier test to see which samples are outliers
+vsd.ge=assay(vst(dds))
+rl=vst(dds)
+e=ExpressionSet(assay(rl), AnnotatedDataFrame(as.data.frame(colData(rl))))
+arrayQualityMetrics(e,outdir="outlier_raw",intgroup=c("Symbiont"),force=T)
+# double-click index.html
+#all good. no outliers detected for raw counts.
+```
+
+```{r unfiltered size factor plots, fig.width = 10, fig.height = 4}
+nrow <- nrow(data) # number of rows/counts (38828)
+countMat <- DESeqDataSetFromMatrix(data, coldata, ~ 1) # makes a DESeqDataSet object with count data, experimental design, and no design formula
+counts_SF <- estimateSizeFactors(countMat) #  estimates the size factors using the "median ratio method" described by Equation 5 in Anders and Huber (2010)
+
+# make dataframe of the size factors to visualize
+sizeFactors <- data.frame(sample = counts_SF@colData@listData[["Sample"]], treat = counts_SF@colData@listData[["Symbiont"]], sizeFactors = counts_SF@colData@listData[["sizeFactor"]])
+cbPalette <- c(Cladocopium="#2c7fb8", Durisdinium ="#de2d26")
+# plot sizeFactors
+ggplot(data = sizeFactors, aes(x = sample, y = sizeFactors, fill = treat)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_manual(values=cbPalette) +
+  #scale_fill_brewer(palette = 2, type = "qual") +
+  geom_bar(stat = "identity") +
+  ggtitle("Unfiltered sizeFactors")
+ggsave("FigSXX_Sizefactor_raw.pdf", width = 4.5, height = 3.5)
+```
+
+
+
+```{r}
+str(coldata)
+#Perform PCA on variance-stabilized data (vsd), including "age" as a grouping variable
+pcaData <- plotPCA(vsd, intgroup = c("Symbiont","Genotype", "Platform"), returnData = TRUE)
+# extract variance for all PCs
+percentVar <- round((100 * attr(pcaData, "percentVar")), 2)
+percentVar
+pcaData$Symbiont <- as.factor(pcaData$Symbiont)
+pcaData$Genotype <- as.factor(pcaData$Genotype)
+pcaData$Platform <- as.factor(pcaData$Platform)
+# Run adonis
+GE_pca <-adonis2(pcaData[, 1:2] ~ Symbiont+Platform, data = pcaData, method = 'euclidean', permutations = 1500)
+GE_pca
+#Df SumOfSqs      R2       F    Pr(>F)    
+#Symbiont  1   1997.0 0.28025  7.5729 0.0053298 ** 
+#Platform  1   3019.3 0.42370 11.4494 0.0006662 ***
+#Residual  8   2109.7 0.29605                      
+#Total    10   7125.9 1.00000  
+#platform bias is showing up. I will run combatseq to remove batch effects of seqeuncing platform.
+```
+
+```{r}
+##
+shapes = c("ECAH"=21,"ECG"=22,"ORAPG"=24, "P2"=25, "P3"=8)
+colvec<- c(Cladocopium="brown4", Durisdinium ="darkgreen")
+#points are overlapping with each other. Use jitter to make each point visible.
+pca_plot <- ggplot(pcaData, aes(PC1, PC2, shape = Genotype, group = Symbiont, fill = Symbiont, colour = Symbiont)) +
+  geom_jitter(size = 1.5, stroke = 0.7, alpha = 0.8, width = 3.5, height = 4.5) + # Add jitter to reduce overlap
+  theme_bw() +
+  stat_ellipse(geom = "polygon", alpha = 0.15, aes(fill = Symbiont), show.legend = FALSE) + # Keep ellipses behind points
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar[2], "%)")) +
+  scale_shape_manual(values = shapes) +
+  theme(legend.position = "right") #+facet_wrap(~Year:Lineage, scales = "free_y")
+pca_plot
+ggsave("FIGSXX_PCA_raw.pdf", width = 4.5, height = 3.5)
+```
+
+```{r}
+#start batch correction here.
+#source of code: https://academic.oup.com/nargab/article/2/3/lqaa078/5909519
+#start line 233 in Hannah's script
+#https://github.com/hannahaichelman/Oculina_Host_Sym_GE/blob/main/03_DESeq_Scripts/deseq_culturesymcombined.Rmd
+## Use ComBat_seq to perform batch correction
+# counts is the matrix of gene expression raw counts, converting to a matrix here using as.matrix()
+# batch is the batch effect you are worried about (here, whether in culture or in host, because this corresponds to samples being sequenced at different times on different platforms, and with different library prep methods)
+# group is the biological treatment of interest(here, Symbiont treatment)
+# ComBat-seq needs raw, unnormalized, unlogged counts as an input. Do not apply any rarification before running the batch effects. 
+#
+corrected_data = ComBat_seq(counts = as.matrix(data), batch = coldata$Platform, group = coldata$Symbiont)
+## Save dds and vsd data 
+save(corrected_data, file = "pacuta_kate_transformed_counts.RData")
+```
+
+
+```{r}
+#Look at total counts
+# Assuming corrected_data and coldata are already loaded and correctly aligned
+totalCounts.corr = colSums(corrected_data)
+
+num_colors = length(unique(coldata$Genotype))
+color_palette = brewer.pal(num_colors, "Set3")
+
+# Mapping each sample to a color
+sample_colors = color_palette[as.factor(coldata$Genotype)]
+
+# Creating the barplot
+barplot(totalCounts.corr, col=sample_colors, ylab="raw counts", main="P acuta - Batch corrected",
+        names.arg=colnames(corrected_data))
+
+min(totalCounts.corr)
+#682823
+max(totalCounts.corr) 
+#3754498
+```
+```{r}
+data=corrected_data
+nrow <- nrow(data) # number of rows/counts (38828)
+countMat <- DESeqDataSetFromMatrix(data, coldata, ~ 1) # makes a DESeqDataSet object with count data, experimental design, and no design formula
+counts_SF <- estimateSizeFactors(countMat) #  estimates the size factors using the "median ratio method" described by Equation 5 in Anders and Huber (2010)
+
+# make dataframe of the size factors to visualize
+sizeFactors <- data.frame(sample = counts_SF@colData@listData[["Sample"]], treat = counts_SF@colData@listData[["Symbiont"]], sizeFactors = counts_SF@colData@listData[["sizeFactor"]])
+cbPalette <- c(Cladocopium="brown4", Durisdinium ="darkgreen")
+# plot sizeFactors
+ggplot(data = sizeFactors, aes(x = sample, y = sizeFactors, fill = treat)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_manual(values=cbPalette) +
+  #scale_fill_brewer(palette = 2, type = "qual") +
+  geom_bar(stat = "identity") +
+  ggtitle("Combatseq filtered sizeFactors")
+ggsave("FIGSXX_Sizefactors_kate_batch_corr.pdf", width = 4.5, height = 3.5)
+```
+
+
+```{r}
+dds <- DESeq2::DESeqDataSetFromMatrix(
+  countData = corrected_data,
+  colData = coldata,
+  design = ~ Genotype
+)
+```
+
+
+```{r}
+keep.corr = rowSums(counts(dds) >= 2) >= 10 # at least 9 samples (80%) with a count of 2 or higher
+dds = dds[keep.corr,]
+dds<-DESeq(dds)
+## saving the rlog for DEG heatmap
+rlog <- DESeq2::rlog(dds, blind = TRUE) #for use later on
+#save text
+rlog_matrix <- assay(rlog)
+vsd <- varianceStabilizingTransformation(dds, blind = TRUE) # quickly estimate dispersion trend and apply a variance stabilizing transformation
+write.table(rlog_matrix, file = "FIGSXX_Pacuta_COrrected_rlog_normalized_counts_batch.txt", sep = "\t", quote = FALSE, col.names = NA)
+vsd_matrix <- assay(vsd)
+write.table(vsd_matrix, file = "FIGSXX_Pacuta_COrrected_vsd_normalized_counts.txt", sep = "\t", quote = FALSE, col.names = NA)
+## Save dds and vsd data 
+save(corrected_data,dds, vsd, rlog, file = "pactua_transformed_counts.RData")
+```
+
+```{r}
+#check nfkb expression
+nfkb_data <- vsd_matrix["Pocillopora_acuta_HIv2___RNAseq.g25813.t1", ]
+nfkb_data <- data.frame(
+  Counts = as.numeric(nfkb_data),
+  Symbiont = coldata$Symbiont,
+  Genotype = coldata$Genotype
+)
+ggplot(nfkb_data, aes(x = Symbiont, y = Counts, fill = Symbiont )) +
+  geom_boxplot() +
+  labs(title = "Expression of Pocillopora_acuta_HIv2___RNAseq.g25813.t1 across Conditions",
+       x = "Condition",
+       y = "Expression") +
+  theme_minimal()
+
+shapes = c("ECAH"=21,"ECG"=22, "ORAPG"=24, "P2"=25, "P3"=8)
+colvec<- c(Cladocopium="brown4", Durisdinium ="darkgreen")
+
+ggplot(nfkb_data, aes(x=Symbiont, y=Counts,fill=Symbiont,color=Symbiont,group=Symbiont, shape = Genotype))+
+  geom_boxplot(outlier.shape=NA, alpha=0.5,)+
+  scale_fill_manual(values=colvec)+
+  scale_color_manual(values=colvec)+
+  geom_jitter(aes(col = Symbiont),size=2.5,width = 0.15, alpha=.9)+
+  ylab("Normalized NFKB raw count")+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "bottom") 
+#do kruskal wallis test
+```
+
+```{r}
+#check if significant
+#
+#install.packages("lme4")   # only once, if not installed
+library(lme4)              # every new R session
+nfkb <- lm(Counts ~ Symbiont*Genotype, data = nfkb_data)
+anova(nfkb)
+```
+
+
+```{r}
+str(coldata)
+#Perform PCA on variance-stabilized data (vsd), including "age" as a grouping variable
+pcaData <- plotPCA(vsd, intgroup = c("Symbiont","Genotype", "Platform"), returnData = TRUE)
+# extract variance for all PCs
+percentVar <- round((100 * attr(pcaData, "percentVar")), 2)
+percentVar
+pcaData$Symbiont <- as.factor(pcaData$Symbiont)
+pcaData$Genotype <- as.factor(pcaData$Genotype)
+
+# Run adonis Symbiont and Platform
+GE_pca <-adonis2(pcaData[, 1:2] ~ Symbiont+Genotype+Platform, data = pcaData, method = 'euclidean', permutations = 1500)
+GE_pca
+# Df SumOfSqs      R2     F   Pr(>F)   
+#Symbiont  1   2141.6 0.54454 9.591 0.007328 **
+#Platform  1      4.9 0.00125 0.022 0.986009   
+#Residual  8   1786.4 0.45421                  
+#Total    10   3932.9 1.00000
+#All good. platform is not sig anymore. use the corrected data to dowstream analysis now.
+```
+```{r}
+# Run adonis Symbiont and Genotype
+GE_pca <-adonis2(pcaData[, 1:2] ~ Symbiont*Genotype, data = pcaData, method = 'euclidean', permutations = 1500)
+GE_pca
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 1500
+
+#adonis2(formula = pcaData[, 1:2] ~ Symbiont * Genotype, data = pcaData, permutations = 1500, method = "euclidean")
+#         Df SumOfSqs      R2       F    Pr(>F)    
+#Symbiont  1   2554.9 0.54592 222.164 0.0006662 ***
+#Genotype  3   2010.1 0.42951  58.264 0.0006662 ***
+#Residual 10    115.0 0.02457                      
+#Total    14   4679.9 1.00000 
+```
+
+
+```{r}
+##
+shapes = c("ECAH"=21,"ECG"=22, "ORAPG"=24, "P2"=25, "P3"=8)
+colvec<- c(Cladocopium="brown4", Durisdinium ="darkgreen")
+#points are overlapping with each other. Use jitter to make each point visible.
+pca_plot <- ggplot(pcaData, aes(PC1, PC2, shape = Genotype, group = Symbiont, fill = Symbiont, colour = Symbiont)) +
+  geom_jitter(size = 2.5, stroke = 0.7, alpha = 0.8) + # Add jitter to reduce overlap
+  theme_bw() +
+  stat_ellipse(geom = "polygon", alpha = 0.15, aes(fill = Symbiont),level=0.95, show.legend = FALSE) + # Keep ellipses behind points
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar[2], "%)")) +
+  scale_shape_manual(values = shapes) +
+  theme(legend.position = "right")
+pca_plot
+ggsave("FIGSXX_PCA_kate_batch_corrected.pdf", width = 5, height = 3.5)
+```
+
+```{r}
+shapes <- c("ECAH" = 21, "ECG" = 22, "ORAPG" = 24, "P2" = 25, "P3" = 23)
+
+colvec<- c(Cladocopium="brown4", Durisdinium ="darkgreen")
+
+pca_plot <- ggplot(pcaData, aes(PC1, PC2, shape = Genotype, group = Symbiont, fill = Symbiont, colour = Symbiont)) +
+  geom_jitter(size = 2.5, stroke = 0.7, alpha = 0.8)+
+  #ggrepel::geom_text_repel(aes(label = Genotype), size = 3, show.legend = FALSE)+
+  theme_bw() +
+  stat_ellipse(geom = "polygon", alpha = 0.15, aes(fill = Symbiont), level = 0.95, show.legend = FALSE) +
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  xlab(paste0("PC1 (", round(percentVar[1], 2), "%)")) +
+  ylab(paste0("PC2 (", round(percentVar[2], 2), "%)")) +
+  scale_shape_manual(values = shapes) +
+  coord_fixed(xlim = c(-50, 50), ylim = c(-45, 45)) +
+  theme(legend.position = "right")+
+  theme(legend.position = "right")+ geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60")
+
+pca_plot
+
+ggsave("FIG1_PCA_kate_batch_corrected.pdf", plot = pca_plot, width = 5, height = 3.5)
+```
+
+```{r}
+library(ggplot2)
+library(cowplot)
+
+pc1 <- ggplot(pcaData, aes(Symbiont, PC1, fill = Symbiont, colour = Symbiont)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(aes(shape = Genotype),
+              width = 0.1, size = 3, stroke = 0.7) +
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  theme_bw() +
+  ylab("PC1")
+
+pc2 <- ggplot(pcaData, aes(Symbiont, PC2, fill = Symbiont, colour = Symbiont)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(aes(shape = Genotype),
+              width = 0.1, size = 3, stroke = 0.7) +
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  scale_shape_manual(values = shapes) +
+  theme_bw() +
+  ylab("PC2")
+
+combined_plot <- plot_grid(pc1, pc2, ncol = 2)
+
+ggsave("FIGSXX_PCA_boxplots_corr.pdf", plot = combined_plot, width = 10, height = 3.5)
+```
+
+
+
+
+```{r}
+colvec<- c(Hiseq="pink", TagSeq ="blue")
+pcaData <- na.omit(pcaData)  # Remove rows with NA values
+
+pca_plot_plat <- ggplot(pcaData, aes(PC1, PC2, shape = Genotype, group = Platform, fill = Platform, colour = Platform )) +
+  geom_jitter(size = 1.5, stroke = 0.7, alpha = 0.8, width = 3.5, height = 4.5) + # Add jitter to reduce overlap
+  theme_bw() +
+  stat_ellipse(geom = "polygon", alpha = 0.15, aes(fill = Platform),level=0.95, show.legend = FALSE) + # Keep ellipses behind points
+  scale_fill_manual(values = colvec) +
+  scale_color_manual(values = colvec) +
+  xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ylab(paste0("PC2 (", percentVar[2], "%)")) +
+  scale_shape_manual(values = shapes) +
+  theme(legend.position = "right")
+pca_plot_plat
+```
+
+
+```{r Differential gene expression}
+#Durisdinium vs Cladocopium pairwise comparisons
+coldata$Symbiont<-factor(coldata$Symbiont, levels=c("Durisdinium","Cladocopium"))
+#results will be Dur/Cladocopium
+dge_Dur <- results(dds, contrast=c("Symbiont","Durisdinium","Cladocopium"))
+#check DGE cutoff padj <0.05
+table(dge_Dur$padj<0.05)
+#FALSE  TRUE 
+ #7038  1336 
+summary(dge_Dur, alpha=0.05)
+#out of 14814 with nonzero total read count
+#adjusted p-value < 0.05
+#LFC > 0 (up)       : 819, 5.5%
+#LFC < 0 (down)     : 950, 6.4%
+##outliers [1]       : 1, 0.0068%
+#low counts [2]     : 575, 3.9%
+#export results as table
+#filter res_heat for padj<0.05
+dge_Dur_fltd <- dge_Dur[which(dge_Dur$padj<0.05),]
+write.table(dge_Dur, file="dge_Dur.txt", quote=F, sep="\t")
+dge_Dur<-read.delim("dge_Dur.txt",header = TRUE)
+dge_Dur_fltd <- dge_Dur[which(dge_Dur$padj<0.05),]
+```
+
+```{r}
+# Categorize the genes as upregulated or downregulated
+# Function to categorize and summarize data
+summarize_data <- function(data, label) {
+  data$regulation <- ifelse(data$log2FoldChange > 0, "Upregulated", "Downregulated")
+  summary_data <- as.data.frame(table(data$regulation))
+  colnames(summary_data) <- c("Regulation", "Count")
+  summary_data$Dataset <- label
+  return(summary_data)
+}
+
+# Summarize each data frame
+duris <- summarize_data(dge_Dur_fltd, "Heat")
+col<-c("Upregulated"="Red","Downregulated"="Blue")
+# Create the combined stacked bar plot
+ggplot(duris, aes(x = Regulation, y = Count, fill = Regulation)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(x = "Treatment",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_manual(values = col)+coord_flip()+geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "white", size=5)
+ggsave("DGE_stack_barplot.pdf", width = 4.3, height = 3)
+```
+
+```{r}
+#prepare data matrix for GOMWU
+# Prepare data frame with required transformations
+data_dge <- as.data.frame(dge_Dur)
+data_dge$Gene<-row.names(data_dge)
+data_dge<-read.delim("dge_Dur.txt", header=TRUE, row.names=1)
+# Move row names to a column named 'Gene'
+data_dge$Gene <- rownames(data_dge)
+
+# Optionally, make 'Gene' the first column if not already
+data_dge <- data_dge[, c("Gene", setdiff(names(data_dge), "Gene"))]
+data_dge <- data_dge %>%
+  mutate(
+    signedlogP = -log10(pvalue) * if_else(log2FoldChange < 0, -1, 1)
+  )
+# Adjust pvalue based on the sign of log2FoldChange
+#gomwu suggest to use "form of "signed negative log p-values". These measures are negative decimal logarithms of the raw (uncorrected) p-value for each gene, multiplied by -1 if the gene was down-regulated. As a result, highly significant up-regulated genes get highly positive values, and highly significant down-regulated genes get highly negative values." from Misha Matz file
+data_dge$Spvalue<-log(data_dge$pvalue)
+#https://github.com/hrivera28/oculina_heterotrophy/blob/main/Master_analyses_final.R line 949-950
+data_dge<-mutate(data_dge,signedlogP=case_when(log2FoldChange<0 ~ Spvalue, log2FoldChange>0 ~ Spvalue*-1))
+
+# Select and rename columns to create the final matrix
+dge_matrix_gomwu <- data_dge[, c("Gene", "signedlogP")]
+colnames(dge_matrix_gomwu) <- c("Gene", "signedlogP")
+dge_matrix_gomwu2<-dge_matrix_gomwu[1:2]
+# Remove row names
+rownames(dge_matrix_gomwu2) <- NULL
+# Set the option to print numbers in standard decimal format
+options(scipen = 999)
+write.csv(dge_matrix_gomwu2, file="dge_Dur_gomwu.csv", quote=FALSE,row.names=FALSE)
+options(scipen = 0)
+```
+
+```{r}
+diff_expr_matrix <- data_dge
+str(diff_expr_matrix)
+volcano_data <- data.frame(
+    Gene = diff_expr_matrix$Gene,  # This is incorrect because row.names will not exist.
+    log2FoldChange = diff_expr_matrix$log2FoldChange,
+    padj = diff_expr_matrix$padj
+)
+
+# The significantly differentially expressed genes are the ones found in the upper-left and upper-right corners.
+# Add a column to the data frame to specify if they are UP- or DOWN- regulated (log2FoldChange respectively positive or negative)
+
+# add a column of NAs
+volcano_data$diffexpressed <- "Not significant"
+
+# if log2Foldchange > 0 and pvalue < 0.1, set as "UP" 
+volcano_data$diffexpressed[volcano_data$log2FoldChange > 0 & volcano_data$padj < 0.05] <- "UP"
+# if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+volcano_data$diffexpressed[volcano_data$log2FoldChange < -0 & volcano_data$padj < 0.05] <- "DOWN"
+data_count_1 <- aggregate(data = volcano_data,                # Applying aggregate
+                          Gene ~ diffexpressed,
+                          function(x) length(unique(x)))
+data_count_1  
+# Re-plot but this time color the points with "diffexpressed"
+p <- ggplot(data=volcano_data, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + geom_point() + theme_bw()
+p
+## Change point color 
+# 1. by default, it is assigned to the categories in an alphabetical order):
+p1 <- p + scale_color_manual(values=c("brown4", "grey", "darkgreen"))
+p1
+ggsave("Dur_Clad_volcano_plot.pdf", width = 4.5, height = 2.5)
+```
+
+
+```{r}
+#start GOMWU
+#notes when running GOMWU: the input data file should list all genes that were used in WGCNA; the genes that are not included in the module should receive a significance measure of 0, and genes within the module - a kME (correlation) values from WGCNA. If you are analysing signed WGCNA modules, add 'Module=TRUE,Alternative="g"' option when running gomwuStats(); for unsigned modules, just 'Module=TRUE' (see comments in the GO_MWU.R script).
+```
+
+
+```{r}
+goDatabase="go.obo"
+goDivision="BP"
+source("gomwu.functions.R")
+goAnnotations="Pocillopora_acuta_final.isotab"
+#GOMWU analysis of Dur/Cla
+#im gonna be using all dge files here.
+
+dur_cla="dge_Dur_gomwu.csv"
+gomwuStats(dur_cla, goDatabase, goAnnotations, goDivision,
+           perlPath="perl",
+           largest=0.10,
+           smallest=5,
+           clusterCutHeight=0.25)
+#go_nrify:
+#12676 categories, 6572 genes; size range 5-657.2
+#	233 too broad
+#	5312 too small
+#	7131 remaining
+#removing redundancy:
+
+#calculating GO term similarities based on shared genes...
+#calculating GO term similarities based on shared genes...
+#5169 non-redundant GO categories of good size
+#-------------
+
+#Secondary clustering:
+#calculating similarities....
+#Continuous measure of interest: will perform MWU test
+#18  GO terms at 10% FDR
+```
+
+
+```{r}
+pdf("DurvsClad_GOMWU_BP_v2.pdf", height = 5, width = 8)
+gomwuPlot(dur_cla,goAnnotations,goDivision,
+                  absValue=-log(0.05,10),  # genes with the measure value exceeding this will be counted as "good genes". This setting is for signed log-pvalues. Specify absValue=0.001 if you are doing Fisher's exact test for standard GO enrichment or analyzing a WGCNA module (all non-zero genes = "good genes").
+                  #	absValue=1, # un-remark this if you are using log2-fold changes
+                  level1=0.05, # FDR threshold for plotting. Specify level1=1 to plot all GO categories containing genes exceeding the absValue.
+                  level2=0.01, # FDR cutoff to print in regular (not italic) font.
+                  level3=0.001, # FDR cutoff to print in large bold font.
+                  txtsize=2,    # decrease to fit more on one page, or increase (after rescaling the plot so the tree fits the text) for better "word cloud" effect
+                  treeHeight=0.20, # height of the hierarchical clustering tree
+                  colors=c("brown4","darkgreen","brown4","darkgreen") # these are default colors, un-remar and change if needed
+)
+dev.off()
+```
+
+
+```{r}
+library(htmltools)
+library(arrayQualityMetrics)
+library(DESeq2)
+library(tidyr)
+library(genefilter)
+library(cowplot)
+library(emmeans)
+library(gplots)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggtext)
+library(ape)
+library(vegan)
+library(RColorBrewer)
+library(dplyr)
+library(pheatmap)
+```
+
+
+```{r}
+# Extract genes associated with the specific category
+genes<-read.delim2("BP_dge_Dur_gomwu.csv", header = TRUE)
+str(genes)
+# Filter rows where the 'value' column is less than 0.1
+genes <- genes[genes$value < 0.05, ]
+## Filter for genes where the category contains "immune"
+#all genes related to immune response
+genes_in_immune <- genes[grep("immune", genes$name, ignore.case = TRUE), "seq"]
+#genes_in_immune<- genes[genes$name == "immune response", "seq"]
+#retainde 129 genes
+write.csv(genes_in_immune, file="immune_genes_in_BP.csv")
+#filter amide biosynthetic process
+genes_MCC <- genes[genes$name == "mitotic cell cycle", "seq"]
+write.csv(genes_MCC, file="genes_MCC.csv")
+#filter name that have oxidative phosphorylation
+genes_OP <- genes[genes$name == "oxidative phosphorylation", "seq"]
+write.csv(genes_OP, file="oxidative_phosphorylation.csv")
+```
+
+```{r}
+# construct a heatmap for all interesting GO terms i will include in results of the manuscript. I will include this figues as supplementary information.
+#load combatseq log normalized count. this script is for visualization purposes, so normalized counts is better.
+gene_exp <- read.delim("Pacuta_COrrected_rlog_normalized_counts.txt", header = TRUE, row.names = NULL)
+#load matrix containing gene or tersm of interest
+gene_matrix <- read.csv("immune_genes_in_BP.csv", header = TRUE)
+#read in sample information matrix
+coldata <- read.csv("Baseline_acuta_info.csv", header = TRUE)
+# Remove columns B and C in sample info
+coldata <- subset(coldata, !(Sample %in% c("B", "C")))
+
+
+
+dge_gene<-read.delim("dge_Dur.txt", header = TRUE, row.names = NULL)
+str(dge_gene)
+names(dge_gene)[1] <- "Gene"
+
+# Check the structure of the data
+str(gene_exp)
+str(gene_matrix)
+gene_matrix <- select(gene_matrix, -X)
+str(gene_matrix)
+
+# Subset columns 1 and 3
+immune <- gene_matrix
+str(immune)
+str(dge_gene)
+# Join data frames
+immune_all <- left_join(immune, dge_gene, by = c("x" = "Gene"))
+str(immune_all)
+```
+
+
+```{r}
+#remove the Gene_name that has NA in immune_all
+immune_all <- immune_all[!is.na(immune_all$x),]
+str(immune_all)
+
+#pullout exprssion values of immune genes from original matrix
+immune_all_de <- left_join(immune_all, gene_exp, by = c("x" = "X"))
+
+# Ensure unique row names by appending a unique identifier to duplicates
+make_unique <- function(x) {
+  ave(x, x, FUN = function(y) if (length(y) > 1) paste0(y, "_", seq_along(y)) else y)
+}
+
+gene_expression <- immune_all_de
+#gene_expression$x <- make_unique(gene_expression$x)
+#rownames(gene_expression) <- gene_expression$x
+library(dplyr)
+
+# Filter the dataframe for p-values less than 0.1
+gene_expression1 <- gene_expression %>% 
+  filter(padj < 0.10)
+#113 genes
+write.csv(gene_expression1, file="immune_gene_expression_DE.csv")
+# Create a new dataframe without the 'Gene' column
+gene_expression_no_gene <- select(gene_expression1, -x)
+
+# Convert gene_expression_no_gene to a matrix, excluding the first seven columns
+gene_matrix <- as.matrix(gene_expression_no_gene[, -c(1:6)])
+
+# Prepare annotation data
+annotation_col <- data.frame(
+  Symbiont = coldata$Symbiont,
+  Genotype = coldata$Genotype
+)
+# Align column names of gene_matrix with row names of annotation_col
+colnames(gene_matrix) <- colnames(gene_matrix)
+rownames(annotation_col) <- colnames(gene_matrix)
+
+
+rownames(annotation_col) <- coldata$Sample
+```
+
+
+```{r}
+# Extract gene IDs from row names of the DE results table
+dge_Dur_fltd_1 <- data.frame(
+  gene_id = trimws(rownames(dge_Dur_fltd)),
+  stringsAsFactors = FALSE
+)
+
+# Convert gene_matrix to data frame
+gene_matrix <- as.data.frame(gene_matrix)
+
+# Add row names of gene_matrix as gene_id
+gene_matrix$gene_id <- trimws(rownames(gene_matrix))
+
+# Put gene_id first
+gene_matrix <- gene_matrix[, c("gene_id", setdiff(names(gene_matrix), "gene_id"))]
+
+# Remove row names since gene_id is now a column
+rownames(gene_matrix) <- NULL
+
+library(dplyr)
+
+# Join by gene_id
+gene_matrix_im <- left_join(dge_Dur_fltd_1, gene_matrix, by = "gene_id")
+
+# Remove rows with missing expression values
+gene_matrix_im <- na.omit(gene_matrix_im)
+
+# Put gene_id back as row names
+gene_matrix_im <- as.data.frame(gene_matrix_im)
+rownames(gene_matrix_im) <- gene_matrix_im$gene_id
+gene_matrix_im$gene_id <- NULL
+
+# Check result
+head(gene_matrix_im)
+dim(gene_matrix_im)
+```
+
+
+
+```{r}
+# Remove potential leading/trailing whitespace
+dge_Dur_fltd_1$gene_id <- trimws(dge_Dur_fltd_1$gene_id)
+gene_matrix$gene_id <- trimws(gene_matrix$gene_id)
+
+# Optionally, convert to the same case if necessary
+dge_Dur_fltd_1$gene_id <- tolower(dge_Dur_fltd_1$gene_id)
+gene_matrix$gene_id <- tolower(gene_matrix$gene_id)
+
+# Re-attempt the join
+gene_matrix_im <- left_join(dge_Dur_fltd_1, gene_matrix, by = "gene_id")
+
+# Remove all rows that contain any NA values
+gene_matrix_im <- na.omit(gene_matrix_im)
+
+# Check the result
+head(gene_matrix_im)
+
+```
+
+```{r}
+#read full unfiltered DE matrix with full annotation
+genes<-read.csv("DurVsCla_DGE_annotaion_UNFILTERED.csv", header=TRUE)
+#filter genes and retain genes <0.05 pval, only retain immune related
+genes_1 <- genes %>%
+  filter(grepl("immune", name, ignore.case = TRUE) & pvalue < 0.05)
+#remove duplicated column seq. there will be duplicated gene names because some gene will have matches to different immune related leaves in GO tree.
+genes_1 <- genes_1 %>%
+  distinct(seq, .keep_all = TRUE)
+#121 genes remaining
+write.csv(genes_1, file="immune_gene_expression_DE_with_full_annots_final.csv")
+```
+
+
+
+```{r}
+library(pheatmap)
+library(dplyr)
+library(RColorBrewer)
+#final in the manuscrip
+genes <- read.csv("Select_immune_gene_expression_DE_with_full_annots_final.csv", header = TRUE)
+
+genes <- genes %>%
+  distinct(seq, .keep_all = TRUE)
+
+genes$unique_gene_name <- paste(genes$Gene_name, seq_along(genes$Gene_name), sep = "_")
+rownames(genes) <- genes$unique_gene_name
+
+col <- colorRampPalette(brewer.pal(11, "RdBu"))(100)
+
+pdf("Fig3filtered_immune_heatmap_base_DE.pdf", height = 10, width = 7.5)
+
+pheatmap(
+  genes[14:28],
+  col = rev(col),
+  cutree_rows = 2,
+  cutree_cols = 2,
+  main = "Expression of Immune genes",
+  fontsize_row = 10,
+  fontsize_col = 7,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  scale = "row",
+  show_rownames = TRUE,
+  border_color = FALSE,
+  clustering_callback = function(hc, mat) {
+    as.hclust(rev(as.dendrogram(hc)))
+  }
+)
+
+dev.off()
+```
+
+```{r}
+library(pheatmap)
+library(dplyr)
+library(RColorBrewer)
+
+genes <- read.csv("Select_immune_gene_expression_DE_with_full_annots_final.csv", header = TRUE)
+
+# remove duplicated seq entries
+genes <- genes %>%
+  distinct(seq, .keep_all = TRUE)
+
+# make rownames unique internally
+genes$Gene_name_clean <- make.unique(as.character(genes$Gene_name))
+rownames(genes) <- genes$Gene_name_clean
+
+# choose only expression columns
+mat <- as.matrix(genes[, 14:28])
+
+# nicer row labels: original gene names
+row_labels <- genes$Gene_name
+
+c_samples <- c("ECAH1", "ECAH2", "ECAH3",
+               "P2_a", "P2_b", "P2_c")
+
+d_samples <- c("ECG1", "ECG2", "ECG3",
+               "ORAPG1", "ORAPG2", "ORAPG3",
+               "P3_a", "P3_b", "P3_c")
+
+desired_order <- c(c_samples, d_samples)
+mat <- mat[, desired_order]
+# optional: column annotation
+annotation_col <- data.frame(
+  Symbiont = c(rep("C-hosting", length(c_samples)),
+               rep("D-hosting", length(d_samples)))
+)
+rownames(annotation_col) <- desired_order
+#Symbiont = c(Cladocopium="brown4", Durisdinium ="darkgreen"),
+ann_colors <- list(
+  Symbiont = c("Cladocopium" = "goldenrod2",
+               "Durisdinium" = "darkgreen")
+)
+
+# color palette
+col_fun <- colorRampPalette(rev(brewer.pal(11, "RdBu")))(100)
+
+pdf("filtered_immune_heatmap_base_DE.pdf", height = 10, width = 8)
+pheatmap(
+  mat,
+  color = col_fun,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,   # keep your chosen sample order
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  labels_row = row_labels,
+  annotation_col = annotation_col,
+  annotation_colors = ann_colors,
+  fontsize_row = 8,
+  fontsize_col = 8,
+  border_color = NA,
+  angle_col = 45,
+  main = "Expression of immune genes"
+)
+
+dev.off()
+```
+
+
+```{r}
+library(pheatmap)
+library(dplyr)  # Added: needed for distinct() and pipe operator
+
+# Read the data
+genes <- read.csv("Select_immune_gene_expression_DE_with_full_annots_final.csv", header = TRUE)
+
+# Filter genes - retain only those with p-value < 0.05 and immune-related
+# First filter, then remove duplicates
+genes <- genes %>%# Assuming your p-value column is named "pval"
+  distinct(seq, .keep_all = TRUE)
+
+# Append a unique identifier to gene names
+genes$unique_gene_name <- paste(genes$Gene_name, seq_len(nrow(genes)), sep = "_")
+
+# Set the new unique_gene_name as row names
+rownames(genes) <- genes$unique_gene_name
+
+# Define annotation_col and ann_colors (these need to be defined based on your data)
+# Example for annotation_col (modify according to your column structure):
+# annotation_col <- data.frame(
+#   Condition = rep(c("Control", "Treatment"), each = 6),
+#   row.names = colnames(genes)[14:25]
+# )
+
+# Example for ann_colors (modify according to your annotation):
+# ann_colors <- list(
+#   Condition = c(Control = "blue", Treatment = "red")
+# )
+
+# Define color palette for heatmap
+col <- colorRampPalette(c("blue", "white", "red"))(100)  # Added: define color palette
+
+# Create heatmap
+pdf("filtered_immune_heatmap_base_DE.pdf", height = 10, width = 7.5)
+pheatmap(genes[14:28],
+         # annotation_col = annotation_col,  # Commented out until you define this
+         col = rev(col),
+         cutree_rows = 2,
+         cutree_cols = 2,
+         # annotation_colors = ann_colors,  # Commented out until you define this
+         main = "Expression of Immune genes",
+         fontsize_row = 10,
+         fontsize_col = 7,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE, 
+         scale = "row",
+         show_rownames = TRUE,
+         border_color = FALSE)
+dev.off()
+```
+
+
+
